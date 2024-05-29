@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import numpy as np
 import subprocess
@@ -331,6 +332,8 @@ def get_angle_stats(A, B, C, res, breaks, framerate = 30, name = None, alternate
         if SAVE_FIGS:
             plt.savefig("plots/single-hip-angle.pdf", bbox_inches='tight')
         plt.show()
+
+    # print(f'breaks -> {breaks} from get_angle_stats()')
         
     for i in range(len(breaks)-1):
         if (alternate==1) and i % 2 == 1:
@@ -349,6 +352,9 @@ def get_angle_stats(A, B, C, res, breaks, framerate = 30, name = None, alternate
         a = (v[1:(n-1)] - v[0:(n-2)])*framerate
         
         diffs.append( np.quantile(y, 0.95) - np.quantile(y, 0.05) )
+
+        # print(f'diffs variable -> {diffs} \n inside first for loop from get_angle_stats() after append')
+
         sds.append( np.std(y) )
         
         vel.append( np.median(v) )
@@ -360,19 +366,21 @@ def get_angle_stats(A, B, C, res, breaks, framerate = 30, name = None, alternate
         vel_min.append( np.quantile(v, 0.05) )
         acc_min.append( np.quantile(a, 0.05) )
     
-    for i in range(len(breaks)-1):
-        if (alternate==1) and i % 2 == 1:
-            continue
-        if (alternate==-1) and i % 2 == 0:
-            continue
+    # for i in range(len(breaks)-1):
+    #     if (alternate==1) and i % 2 == 1:
+    #         continue
+    #     if (alternate==-1) and i % 2 == 0:
+    #         continue
                 
-        nlen = breaks[i+1] - breaks[i]
-        nfrom = int(breaks[i] - nlen*1/3)
-        nto = int(breaks[i] + nlen*1/3)
+    #     nlen = breaks[i+1] - breaks[i]
+    #     nfrom = int(breaks[i] - nlen*1/3)
+    #     nto = int(breaks[i] + nlen*1/3)
             
-        lang = langle[nfrom:nto]
+    #     lang = langle[nfrom:nto]
             
-        diffs.append( np.quantile(y, 0.95) - np.quantile(y, 0.05) )
+    #     diffs.append( np.quantile(y, 0.95) - np.quantile(y, 0.05) )
+
+    #     print(f'diffs variable -> {diffs} \n inside second for loop from get_angle_stats() after append')
 
     
     sts = ""
@@ -380,6 +388,8 @@ def get_angle_stats(A, B, C, res, breaks, framerate = 30, name = None, alternate
         sts = "_sit2stand"
     if alternate == -1:
         sts = "_stand2sit"
+
+    # print(f'diffs variable -> {diffs} \n from get_angle_stats()')
 
     return {
         "{}_range_mean{}".format(name,sts): np.mean(diffs),
@@ -709,13 +719,15 @@ def get_segments(res, magnitude = 1, magnitude_loc = 1, framerate = 30):
     # downs = downs[np.append(downs[1:] - downs[:-1] > 5,True)]
     # ups = ups[np.append(ups[1:] - ups[:-1] > 5,True)]
     
-    print(downs)
-    print(ups)
+    print(f'downs -> {downs} from get_segments()')
+    print(f'ups -> {ups} from get_segments()')
     
     if (len(downs) <= 5 and len(ups) == 5) or (len(downs) <= 4 and len(ups) == 4):
         if max(ups) > max(downs):
+            # print(f'max(ups) > max(downs): {max(ups)} > {max(downs)}')
             downs = np.append(downs, max(ups) + np.argmin(ind_y_smooth[max(ups):(max(ups) + ups[-1] - ups[-2])]))
         if min(ups) < min(downs):
+            # print(f'min(ups) < min(downs): {min(ups)} < {min(downs)}')
             start_idx = int(min(ups) - (int(ups[1]) - int(ups[0]))/2)
             if start_idx < 0:# and start_idx >= -5:
                 start_idx = 0
@@ -745,13 +757,13 @@ def get_segments(res, magnitude = 1, magnitude_loc = 1, framerate = 30):
         if loc_downs.shape[0]>=2:
             downs[dd] = ups[i] + loc_downs[-1,0]
         if loc_downs.shape[0]>2:
-            print("ERROR, to mane dips")
+            print("ERROR, to many dips")
            
 #    if downs[-1] > ups[-1]:
 #        downs = downs[:-1]
         
-    print(downs)
-    print(ups)
+    print(f'downs -> {downs} from get_segments() after correction')
+    print(f'ups -> {ups} from get_segments() after correction')
         
     scale = framerate
     
@@ -764,6 +776,7 @@ def get_segments(res, magnitude = 1, magnitude_loc = 1, framerate = 30):
     
     for i in range(downs.shape[0]):
         plt.axvline(x=downs[i]/scale,linewidth=2, color='r', linestyle="--")
+    
         
     
     if SAVE_FIGS:
@@ -879,7 +892,8 @@ def process_raw_video(video_path, processed_npy_path="videos/np/"):
     pass
 
 def process_subject(subjectid, processed_npy_path="videos/np/", framerate = None):
-    res = np.load("{}{}.npy".format(processed_npy_path, subjectid))
+    # res = np.load("{}{}.npy".format(processed_npy_path, subjectid))
+    res = np.load("{}.npy".format(subjectid))
     
     if subjectid == "pmYdj2Zc":
         res = res[:-10,:]
@@ -891,7 +905,7 @@ def process_subject(subjectid, processed_npy_path="videos/np/", framerate = None
     
     orientation = "R" if md < 0 else "L"
     
-    print(orientation)
+    # print(f'orientation -> {orientation} from process_subject()')
     if orientation == "L":
         res[:,0::3] = 1 + res[:,0::3].max()-res[:,0::3]
         # TODO: swap left and right
@@ -940,10 +954,10 @@ def process_subject(subjectid, processed_npy_path="videos/np/", framerate = None
     ups, downs = get_segments(res, magnitude=magnitude, framerate = framerate)
     
     if subjectid in realign:
-        print(downs)
+        print(f'downs -> {downs} from process_subject() before realignment')
         for k,v in realign[subjectid].items():
             downs[k] = v
-        print(downs)
+        print(f'downs -> {downs} from process_subject() after realignment')
     
     # TODO: assert alternating
     allbreaks = sorted(ups.tolist() + downs.tolist())
@@ -954,6 +968,8 @@ def process_subject(subjectid, processed_npy_path="videos/np/", framerate = None
     if len(allbreaks)%2 == 1:
         allbreaks=allbreaks[:(len(allbreaks)-1)]
     allbreaks = np.array(allbreaks)
+
+    # print(f'allbreaks -> {allbreaks} from process_subject()')
     
     results = {
         "subjectid": subjectid,
@@ -965,7 +981,7 @@ def process_subject(subjectid, processed_npy_path="videos/np/", framerate = None
     lengths = res[ups[1]:ups[-2],3*NOSE:(3*NOSE+2)] - res[ups[1]:ups[-2],3*RANK:(3*RANK+2)]
     lengths = np.sqrt(np.sum(lengths**2, axis=1))
     height = np.quantile(lengths, 0.95)
-    print(height)
+    # print(f'height -> {height} from process_subject()')
     
     for i in range(3*25):
         res[:,i] = smooth_ts(res[:,i], framerate)

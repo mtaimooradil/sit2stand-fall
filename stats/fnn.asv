@@ -1,0 +1,53 @@
+function fnn_percent = computeFNN(x, max_m, tau, Rtol, Atol)
+    % computeFNN - Compute the percentage of false nearest neighbors
+    %   x     - Time series data
+    %   max_m - Maximum embedding dimension to consider
+    %   tau   - Time delay
+    %   Rtol  - Radius tolerance for FNN criterion
+    %   Atol  - Absolute tolerance for FNN criterion
+    %
+    %   fnn_percent - Array of FNN percentages for each embedding dimension
+
+    N = length(x);
+    fnn_percent = zeros(1, max_m);
+
+    for m = 1:max_m
+        Y = phaseSpaceReconstruction(x, m, tau);
+        fnn_count = 0;
+        total_count = 0;
+
+        for i = 1:N - (m + 1) * tau
+            % Distance in m-dimensional space
+            dist_m = norm(Y(:, i) - Y(:, i + 1));
+            
+            % Distance in (m+1)-dimensional space
+            dist_m1 = norm([Y(:, i); x(i + m * tau)] - [Y(:, i + 1); x(i + 1 + m * tau)]);
+            
+            % Check FNN criteria
+            if dist_m == 0
+                continue;
+            end
+            if (dist_m1 / dist_m > Rtol) || (dist_m1 - dist_m > Atol)
+                fnn_count = fnn_count + 1;
+            end
+            total_count = total_count + 1;
+        end
+
+        fnn_percent(m) = fnn_count / total_count;
+    end
+end
+
+function Y = phaseSpaceReconstruction(x, m, tau)
+    % phaseSpaceReconstruction - Reconstruct the state space from time series
+    %   x  - Time series data
+    %   m  - Embedding dimension
+    %   tau - Time delay
+    %
+    %   Y  - Reconstructed state space
+
+    N = length(x);
+    Y = zeros(m, N - (m - 1) * tau);
+    for i = 1:m
+        Y(i, :) = x((1:N - (m - 1) * tau) + (i - 1) * tau);
+    end
+end
