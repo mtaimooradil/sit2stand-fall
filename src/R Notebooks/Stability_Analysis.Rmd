@@ -1,0 +1,27 @@
+---
+title: "Stability Analysis"
+output: html_notebook
+---
+
+```{r}
+library(ggpubr)
+library(dplyr)
+
+df <- read.csv('../../stats/merged_Data_Stability_Entropy_AutoCorr.csv')
+df_age50plus <- filter(df, ageGroup == "[50-80+")
+
+value <- df$MSE2
+
+df_clean <- df %>%
+  filter(value >= (quantile(value, 0.25) - 1.5 * IQR(value)) & 
+         value <= (quantile(value, 0.75) + 1.5 * IQR(value)))
+
+
+plot1 <- ggscatter(df_clean, x = "Age", y = "MSE2" , xlab = "Age", size = 3, font.label = c(20, "plain"),
+  ylab = "lyapunovExponent",
+   add = "reg.line",  # Add regressiOn line
+   add.params = list(color = "lightblue", fill = "lightgray"), # Customize reg. line
+   conf.int = TRUE # Add confidence interval
+   )
+plot1 + stat_cor(method = "pearson", label.x = 60, label.y = 0.25)
+```

@@ -1,0 +1,87 @@
+---
+title: "Feature Selection Elastic Net"
+output: html_notebook
+---
+
+```{r}
+
+library(glmnet)
+library(foreach)
+library(doParallel)
+
+all_data_path <- "../../stats/dataClean2.csv"
+kinematic_data_path <- "../../stats/kinematic_features.csv"
+all_data <- na.omit(read.csv(all_data_path))
+# all_data$fallsBin <- as.factor(all_data$fallsBin)
+kinematic_data <- na.omit(read.csv(kinematic_data_path))
+
+
+num_cores <- detectCores() - 1
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+y <- kinematic_data$fallsBin
+X <- as.matrix(kinematic_data[, colnames(kinematic_data) != "fallsBin"])
+
+# Set Elastic Net alpha value (0 = Ridge, 1 = Lasso, 0.5 = Elastic Net)
+alpha <- 0.7
+
+class_weights <- ifelse(y == 1, 371/34, 1)
+
+# Number of bootstrap samples
+n_bootstraps <- 100
+
+# Bootstrap Elastic Net model fitting
+results <- foreach(i = 1:n_bootstraps, .combine = 'c', .packages = c("glmnet", "caret")) %dopar% {
+  # Bootstrap sampling
+  set.seed(i)
+  boot_sample <- sample(1:nrow(X), replace = TRUE)
+  X_boot <- X[boot_sample, ]
+  y_boot <- y[boot_sample]
+  
+  # Resample class weights
+  boot_weights <- class_weights[boot_sample]
+  
+  # Fit Elastic Net model with cross-validation
+  cv_fit <- cv.glmnet(X_boot, y_boot, family = "binomial", alpha = alpha, weights=boot_weights)
+  
+  
+  # Get the coefficients for the best lambda
+  best_lambda <- cv_fit$lambda.min
+  coef_fit <- as.matrix(coef(cv_fit, s = best_lambda))
+  
+  # Return coefficients and selection count (excluding the intercept)
+  list(coefficients = coef_fit[-1], selection = as.integer(coef_fit[-1] != 0))
+}
+
+# Now, `results` is a flat list, so we need to reshape it
+# Convert the flat list back to a list of lists (where each element is a list of `coefficients` and `selection`)
+reshaped_results <- split(results, rep(1:n_bootstraps, each = 2))
+
+# Extract and combine the coefficients and selection vectors across all bootstrap iterations
+coefficients_matrix <- do.call(rbind, lapply(reshaped_results, function(x) x[[1]]))  # First element is coefficients
+selection_matrix <- do.call(rbind, lapply(reshaped_results, function(x) x[[2]]))    # Second element is selection
+
+# Calculate average coefficient for each predictor
+average_coefficients <- apply(coefficients_matrix, 2, median)
+
+# Calculate selection frequency (proportion of times a feature was selected)
+selection_frequency <- apply(selection_matrix, 2, mean)
+
+# Combine selection frequency and average coefficients
+results_df <- data.frame(
+  Predictor = colnames(X),
+  Selection_Frequency = selection_frequency,
+  Average_Coefficient = average_coefficients
+)
+
+# Sort by selection frequency
+results_sorted <- results_df[order(-results_df$Selection_Frequency), ]
+
+# Display the top features
+head(results_sorted, 10)
+
+stopCluster(cl)
+
+```
+write.csv(results_df, "elastic_net_all.csv", row.names = TRUE)

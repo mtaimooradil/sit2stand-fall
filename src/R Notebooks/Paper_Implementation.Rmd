@@ -1,0 +1,191 @@
+---
+title: "Paper Implementation"
+output: html_notebook
+---
+
+```{r}
+library(caret)
+library(dplyr) 
+library(randomForest)
+library(pROC)  # For AUC
+```
+
+```{r}
+all_data_path <- "../../stats/dataClean2.csv"
+all_data <- na.omit(read.csv(all_data_path))
+all_data$targetSteps <- as.numeric(all_data$targetSteps)
+```
+
+```{r}
+# Set up parameters
+set.seed(123)  # For reproducibility
+n_repeats <- 1  # Number of repetitions
+test_size <- 0.3  # 30% for testing
+train_size <- 0.7  # 70% for training
+performance_metrics <- data.frame()  # To store performance metrics for each iteration
+```
+
+```{r}
+compute_class_weights <- function(data) {
+  class_proportions <- table(data)
+  class_weights <- 1 / class_proportions
+  # Assign weights based on class labels in train_data
+  weights <- ifelse(data == names(class_weights)[1], class_weights[1], class_weights[2])
+  return(weights)
+}
+```
+
+```{r}
+align_factor_levels <- function(train_data, test_data) {
+  for (col_name in names(train_data)) {
+    if (is.factor(train_data[[col_name]])) {
+      test_data[[col_name]] <- factor(test_data[[col_name]], levels = levels(train_data[[col_name]]))
+    }
+  }
+  return(test_data)
+}
+```
+
+```{r}
+# Function to calculate performance metrics
+calculate_performance_metrics <- function(predictions, actual_labels, predictions_prob) {
+  
+  # Ensure the lengths of predictions and actual_labels match
+  if (length(predictions) != length(actual_labels)) {
+    stop("Error: Length of predictions and actual labels do not match.")
+  }
+  
+  # Check for any NA values and remove them if necessary
+  complete_cases <- complete.cases(predictions, actual_labels)
+  predictions <- predictions[complete_cases]
+  actual_labels <- actual_labels[complete_cases]
+  
+  # Confusion Matrix
+  conf_matrix <- confusionMatrix(as.factor(predictions), actual_labels)
+  print(conf_matrix)
+  
+  # Extract Evaluation Metrics
+  accuracy <- conf_matrix$overall['Accuracy']
+  sensitivity <- conf_matrix$byClass['Sensitivity']
+  specificity <- conf_matrix$byClass['Specificity']
+  precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+  f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+  
+  # AUC (Area Under the Curve)
+  roc_curve <- roc(actual_labels, predictions_prob)
+  auc_value <- auc(roc_curve)
+  
+  # Return all metrics
+  return(data.frame(accuracy = accuracy, 
+                    sensitivity = sensitivity, 
+                    specificity = specificity, 
+                    precision = precision, 
+                    f1_score = f1_score, 
+                    auc = auc_value))
+}
+```
+
+```{r}
+train_model <- function(data, target_name) {
+  
+  # Ensure the target column exists in the dataset
+  if (!(target_name %in% colnames(data))) {
+    stop(paste("Error: Target variable", target_name, "not found in the dataset"))
+  }
+  
+  # Convert target variable to factor for classification
+  data[[target_name]] <- as.factor(data[[target_name]])
+  
+  # Compute class weights for training data
+  class_weights <- compute_class_weights(data[[target_name]])
+  
+  # Set up cross-validation (10-fold)
+  train_control <- trainControl(method = "cv", number = 10)
+  
+  # Dynamically create the formula for the target variable
+  formula <- as.formula(paste(target_name, "~ ."))
+  
+  # Fit model (e.g., Random Forest, replace with your model)
+  model <- train(formula, 
+                 data = data, 
+                 method = "rf", 
+                 trControl = train_control,)
+#                 weights = class_weights)
+  
+  return(model)
+}
+```
+
+```{r}
+pred_model <- function(model, data, target_name) {
+  # Predict on test data
+  predictions_prob <- predict(model, data, type = "prob")  # Probabilities for class 1)
+  print(predictions_prob)
+  
+  # Convert probabilities to binary class labels (assuming 0.5 threshold)
+  predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+  
+  actual_labels <- as.factor(data[[target_name]])
+  
+  return(list(actual_labels=actual_labels, predictions_prob=predictions_prob, predictions=predictions))
+}
+```
+
+
+```{r}
+run_model <- function(train_data, test_data, target_name) {
+  
+  model <- train_model(train_data, target_name)
+
+  preds <- pred_model(model, test_data, target_name)
+  
+  metrics <- calculate_performance_metrics(preds$predictions, preds$actual_labels, preds$predictions_prob)
+
+  # Return all metrics
+  return(metrics)
+}
+```
+
+```{r}
+# Main loop to repeat the process n times
+for (i in 1:n_repeats) {
+  # Shuffle the data
+  shuffled_data <- all_data[sample(nrow(all_data)), ]
+  
+  # Split the data into training (70%) and testing (30%)
+  train_index <- createDataPartition(shuffled_data$fallsBin, p = train_size, list = FALSE)
+  train_data <- shuffled_data[train_index, ]
+  test_data <- shuffled_data[-train_index, ]
+  
+  # Run the model and get performance metrics
+  metrics <- run_model(train_data, test_data, "fallsBin")
+  
+  # Store the results
+  performance_metrics <- rbind(performance_metrics, metrics)
+}
+
+# Report final performance
+summary(performance_metrics)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

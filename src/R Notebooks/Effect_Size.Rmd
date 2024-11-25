@@ -1,0 +1,49 @@
+---
+title: "Effect Size"
+output: html_notebook
+---
+ 
+
+```{r}
+library(dplyr)
+library(effsize)
+
+all_data_path <- "../../stats/dataClean2.csv"
+kinematic_data_path <- "../../stats/kinematic_features.csv"
+all_data <- na.omit(read.csv(all_data_path))
+all_data$fallsBin <- as.factor(all_data$fallsBin)
+kinematic_data <- na.omit(read.csv(kinematic_data_path))
+kinematic_data$fallsBin <- as.factor(kinematic_data$fallsBin)
+
+# Define your binary outcome variable
+output_variable <- all_data$fallsBin
+
+# Initialize an empty list to store effect sizes
+effect_sizes <- list()
+
+# Loop through each predictor variable in kinematic_data and calculate Cohen's d
+for (variable_name in colnames(all_data)) {
+  variable_data <- all_data[[variable_name]]
+  
+  # Check if the variable is numeric, only calculate effect size for numeric variables
+  if (is.numeric(variable_data)) {
+    # Calculate Cohen's d for each predictor variable against the binary outcome
+    d_value <- cohen.d(variable_data, output_variable)$estimate
+    
+    # Store the result in the list with the variable name
+    effect_sizes[[variable_name]] <- d_value
+  }
+}
+
+# Convert the list to a dataframe for sorting
+effect_sizes_df <- data.frame(
+  variable = names(effect_sizes),
+  effect_size = unlist(effect_sizes)
+)
+
+```
+
+
+```{r}
+write.csv(effect_sizes_df, "effect_sizes_all_factor.csv", row.names=F)
+```

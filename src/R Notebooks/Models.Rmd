@@ -1,0 +1,189 @@
+---
+title: "Models"
+output: html_notebook
+---
+
+
+```{r}
+# Load required libraries
+library(glmnet)
+library(xgboost)
+library(nnet)
+library(rpart)
+library(randomForest)
+library(e1071)
+library(pROC)
+library(caret)
+library(smotefamily)
+
+all_data <- na.omit(read.csv("../../stats/dataClean2.csv"))
+# Convert the target to numeric if needed
+all_data$fallsBin <- as.numeric(as.character(all_data$fallsBin))
+
+# Split the original data into training and test sets (80/20 split)
+set.seed(123)
+trainIndex <- createDataPartition(all_data$fallsBin, p = 0.8, list = FALSE)
+train_data_orig <- all_data[trainIndex, ]
+test_data_orig <- all_data[-trainIndex, ]
+
+x_train_orig <- as.matrix(train_data_orig[, -ncol(train_data_orig)])  # Predictors
+y_train_orig <- train_data_orig$fallsBin  # Response
+
+x_test_orig <- as.matrix(test_data_orig[, -ncol(test_data_orig)])  # Test predictors
+y_test_orig <- test_data_orig$fallsBin  # Test response
+
+# Apply ADASYN on the training set
+set.seed(123)
+adasyn_result <- ADAS(train_data_orig[, -ncol(train_data_orig)], train_data_orig$fallsBin, K = 5)
+train_data_adasyn <- adasyn_result$data
+train_data_adasyn$class <- as.numeric(as.character(train_data_adasyn$class))
+
+x_train_adasyn <- as.matrix(train_data_adasyn[, -ncol(train_data_adasyn)])
+y_train_adasyn <- train_data_adasyn$class
+
+# Helper function to extract all metrics
+extract_metrics <- function(conf_matrix, test_pred_prob, y_test) {
+  accuracy <- conf_matrix$overall["Accuracy"]
+  sensitivity <- conf_matrix$byClass["Sensitivity"]
+  specificity <- conf_matrix$byClass["Specificity"]
+  f1_score <- conf_matrix$byClass["F1"]
+  auc_value <- auc(roc(y_test, test_pred_prob))
+  return(list(accuracy = accuracy, sensitivity = sensitivity, specificity = specificity, f1_score = f1_score, auc = auc_value))
+}
+
+# Define a function to train models and compute metrics
+evaluate_model <- function(model, x_train, y_train, x_test, y_test, model_type) {
+  # Train the model
+  if (model_type == "glmnet") {
+    fit <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 0.5)
+    test_pred_prob <- predict(fit, newx = x_test, type = "response", s = "lambda.min")
+  } else if (model_type == "xgboost") {
+    scale_pos_weight <- sum(y_train == 0) / sum(y_train == 1)
+    fit <- xgboost(data = x_train, label = y_train, objective = "binary:logistic", nrounds = 100, scale_pos_weight = scale_pos_weight, max_depth = 6, eta = 0.3, verbose = 0)
+    test_pred_prob <- predict(fit, newdata = x_test)
+  } else if (model_type == "glm") {
+    fit <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 0.5)
+    test_pred_prob <- predict(fit, newx = x_test, type = "response", s = "lambda.min")
+  } else if (model_type == "mlp") {
+    fit <- nnet(x_train, y_train, size = 1, maxit = 200, linout = FALSE, trace = FALSE)
+    test_pred_prob <- predict(fit, newdata = x_test, type = "raw")
+  } else if (model_type == "tree") {
+    fit <- rpart(y_train ~ ., data = data.frame(x_train, y_train), method = "class")
+    test_pred_prob <- predict(fit, newdata = data.frame(x_test), type = "prob")[, 2]
+  } else if (model_type == "random_forest") {
+    fit <- randomForest(x_train, as.factor(y_train), ntree = 100)
+    test_pred_prob <- predict(fit, newdata = x_test, type = "prob")[, 2]
+  } else if (model_type == "svm") {
+    fit <- svm(x_train, as.factor(y_train), probability = TRUE)
+    test_pred_prob <- attr(predict(fit, x_test, probability = TRUE), "probabilities")[, 2]
+  }
+
+  # Predict classes based on the 0.5 threshold
+  test_pred_class <- ifelse(test_pred_prob > 0.5, 1, 0)
+  
+  y_test <- factor(y_test, levels = c(0, 1))
+  test_pred_class <- factor(test_pred_class, levels = c(0, 1))
+  
+  # Calculate performance metrics
+  conf_matrix <- confusionMatrix(as.factor(test_pred_class), as.factor(y_test), positive = "1")
+  accuracy <- conf_matrix$overall["Accuracy"]
+  sensitivity <- conf_matrix$byClass["Sensitivity"]
+  specificity <- conf_matrix$byClass["Specificity"]
+  f1_score <- conf_matrix$byClass["F1"]
+  roc_curve <- roc(y_test, as.vector(test_pred_prob))
+  auc_value <- auc(roc_curve)
+  
+  # Return the metrics
+  return(list(accuracy = accuracy, sensitivity = sensitivity, specificity = specificity, f1_score = f1_score, auc_value = auc_value))
+}
+
+# Define the function to train models with class weights and evaluate them
+evaluate_models_with_class_weights <- function(x_train, y_train, x_test, y_test) {
+  # Calculate class weights
+  class_weights <- ifelse(y_train == 1, sum(y_train == 0) / length(y_train), sum(y_train == 1) / length(y_train))
+  class_priors <- c("0" = sum(y_train == 0) / length(y_train), "1" = sum(y_train == 1) / length(y_train))
+  
+  # Store the results
+  results <- list()
+  
+  # 1. Elastic Net (glmnet)
+  fit_glmnet <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 0.5, weights = class_weights)
+  test_pred_prob_glmnet <- predict(fit_glmnet, newx = x_test, type = "response", s = "lambda.min")
+  test_pred_class_glmnet <- ifelse(test_pred_prob_glmnet > 0.5, 1, 0)
+  conf_matrix_glmnet <- confusionMatrix(as.factor(test_pred_class_glmnet), as.factor(y_test), positive = "1")
+  results$glmnet <- extract_metrics(conf_matrix_glmnet, test_pred_prob_glmnet, y_test)
+  
+  # 2. XGBoost
+  scale_pos_weight <- sum(y_train == 0) / sum(y_train == 1)
+  fit_xgb <- xgboost(data = x_train, label = y_train, objective = "binary:logistic", nrounds = 100, scale_pos_weight = scale_pos_weight, max_depth = 6, eta = 0.3, verbose = 0)
+  test_pred_prob_xgb <- predict(fit_xgb, newdata = x_test)
+  test_pred_class_xgb <- ifelse(test_pred_prob_xgb > 0.5, 1, 0)
+  conf_matrix_xgb <- confusionMatrix(as.factor(test_pred_class_xgb), as.factor(y_test), positive = "1")
+  results$xgboost <- extract_metrics(conf_matrix_xgb, test_pred_prob_xgb, y_test)
+  
+  # 3. GLM
+  fit_glm <- glm(y_train ~ ., data = data.frame(x_train, y_train), family = "binomial", weights = class_weights)
+  test_pred_prob_glm <- predict(fit_glm, newdata = data.frame(x_test), type = "response")
+  test_pred_class_glm <- ifelse(test_pred_prob_glm > 0.5, 1, 0)
+  conf_matrix_glm <- confusionMatrix(as.factor(test_pred_class_glm), as.factor(y_test), positive = "1")
+  results$glm <- extract_metrics(conf_matrix_glm, test_pred_prob_glm, y_test)
+  
+  # 4. MLP (Neural Network - nnet)
+  fit_nnet <- nnet(x_train, y_train, size = 1, maxit = 200, linout = FALSE, trace = FALSE)
+  test_pred_prob_nnet <- predict(fit_nnet, newdata = x_test, type = "raw")
+  test_pred_class_nnet <- ifelse(test_pred_prob_nnet > 0.5, 1, 0)
+  conf_matrix_nnet <- confusionMatrix(as.factor(test_pred_class_nnet), as.factor(y_test), positive = "1")
+  results$mlp <- extract_metrics(conf_matrix_nnet, test_pred_prob_nnet, y_test)
+  
+  # 5. Decision Trees (rpart)
+  fit_tree <- rpart(y_train ~ ., data = data.frame(x_train, y_train), method = "class", parms = list(prior = class_priors))
+  test_pred_prob_tree <- predict(fit_tree, newdata = data.frame(x_test), type = "prob")[, 2]
+  test_pred_class_tree <- ifelse(test_pred_prob_tree > 0.5, 1, 0)
+  conf_matrix_tree <- confusionMatrix(as.factor(test_pred_class_tree), as.factor(y_test), positive = "1")
+  results$tree <- extract_metrics(conf_matrix_tree, test_pred_prob_tree, y_test)
+
+  # 6. Random Forest (randomForest)
+  class_weights_rf <- c("0" = sum(y_train == 0) / length(y_train), "1" = sum(y_train == 1) / length(y_train))
+  fit_rf <- randomForest(x_train, as.factor(y_train), ntree = 100, classwt = class_weights_rf)
+  test_pred_prob_rf <- predict(fit_rf, newdata = x_test, type = "prob")[, 2]
+  test_pred_class_rf <- ifelse(test_pred_prob_rf > 0.5, 1, 0)
+  conf_matrix_rf <- confusionMatrix(as.factor(test_pred_class_rf), as.factor(y_test), positive = "1")
+  results$random_forest <- extract_metrics(conf_matrix_rf, test_pred_prob_rf, y_test)
+
+  
+  # 7. SVM (e1071)
+  class_weights_svm <- c("0" = sum(y_train == 0) / length(y_train), "1" = sum(y_train == 1) / length(y_train))
+  fit_svm <- svm(x_train, as.factor(y_train), probability = TRUE, class.weights = class_weights_svm)
+  test_pred_prob_svm <- attr(predict(fit_svm, x_test, probability = TRUE), "probabilities")[, 2]
+  test_pred_class_svm <- ifelse(test_pred_prob_svm > 0.5, 1, 0)
+  conf_matrix_svm <- confusionMatrix(as.factor(test_pred_class_svm), as.factor(y_test), positive = "1")
+  results$svm <- extract_metrics(conf_matrix_svm, test_pred_prob_svm, y_test)
+  
+  return(results)
+}
+
+# List of models to evaluate
+models <- c("glmnet", "xgboost", "glm", "mlp", "tree", "random_forest", "svm")
+
+# Evaluate models on the original data
+results_orig <- lapply(models, function(model) {
+   evaluate_models_with_class_weights(x_train_orig, y_train_orig, x_test_orig, y_test_orig)
+})
+
+# Evaluate models on the ADASYN training data, but tested on original test set
+results_adasyn <- lapply(models, function(model) {
+   evaluate_models_with_class_weights(x_train_adasyn, y_train_adasyn, x_test_orig, y_test_orig)
+})
+
+# Print results
+print("Results on original data:")
+print(results_orig)
+
+print("Results with ADASYN:")
+print(results_adasyn)
+
+
+```
+
+
+

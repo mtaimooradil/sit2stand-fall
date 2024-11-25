@@ -1,0 +1,149 @@
+---
+title: "Principle Component Analysis"
+output: html_notebook
+---
+
+```{r}
+library(ggbiplot)
+library(factoextra)
+library(corrplot)
+library(MASS)
+library(klaR)
+```
+
+```{r}
+all_data_path <- "../../stats/dataClean2.csv"
+kinematic_data_path <- "../../stats/kinematic_features.csv"
+all_data <- na.omit(read.csv(all_data_path))
+all_data <- all_data[, c(1:ncol(all_data))]
+falls_all <- as.factor(all_data$fallsBin)
+all_data <- all_data[, !(names(all_data) %in% "fallsBin")]
+all_data <- scale(all_data)
+kinematic_data <- na.omit(read.csv(kinematic_data_path))
+kinematic_data <- kinematic_data[, c(1:ncol(kinematic_data))]
+falls_kin <- as.factor(kinematic_data$fallsBin)
+kinematic_data <- kinematic_data [, !(names(kinematic_data) %in% "fallsBin")]
+kinematic_data <- scale(kinematic_data)
+```
+
+```{r}
+kinematic_data.pca <- prcomp(kinematic_data, center = TRUE, scale = TRUE)
+all_data.pca <- prcomp(all_data, center = TRUE, scale = TRUE)
+summary_all <- summary(all_data.pca)
+summary_kin <- summary(kinematic_data.pca)
+```
+
+```{r}
+plot(kinematic_data.pca, type = "l")
+plot(all_data.pca, type = "l")
+```
+
+```{r}
+imp_pca_all <- data.frame(t(summary_all$imp))
+imp_pca_kin <- data.frame(t(summary_kin$imp))
+```
+
+```{r}
+fviz_eig(all_data.pca, addlabels = F, ncp = 10)
+fviz_eig(kinematic_data.pca, addlabels = F, ncp = 10)
+```
+
+```{r}
+sdev_all <- all_data.pca$sdev
+explained_variance_all <- (sdev_all^2) / sum(sdev_all^2)
+cumulative_variance_all <- cumsum(explained_variance_all)
+sdev_kinematic <- kinematic_data.pca$sdev
+explained_variance_kinematic <- (sdev_kinematic^2) / sum(sdev_kinematic^2)
+cumulative_variance_kinematic <- cumsum(explained_variance_kinematic)
+variance_data_all <- data.frame(
+  PC = paste0("PC", 1:length(explained_variance_all)),
+  Explained_Variance = explained_variance_all,
+  Cumulative_Variance = cumulative_variance_all
+)
+variance_data_kinematic <- data.frame(
+  PC = paste0("PC", 1:length(explained_variance_kinematic)),
+  Explained_Variance = explained_variance_kinematic,
+  Cumulative_Variance = cumulative_variance_kinematic
+)
+```
+
+```{r}
+biplot(kinematic_data.pca)
+```
+
+```{r}
+# falls_all <- factor(falls_all, levels = c(0, 1), labels = c("No Fall", "Fall"))
+g <- ggbiplot(kinematic_data.pca,
+              choices = 3:4,
+              obs.scale = 1,
+              var.scale = 1,
+              groups = falls_all,
+              ellipse = TRUE,
+              circle = TRUE, 
+              var.axes = FALSE) +
+    scale_color_discrete(name = "Falls") +
+    theme(legend.direction = "horizontal", legend.position = "top")
+
+print(g)
+```
+
+```{r}
+pca_components <- as.data.frame(kinematic_data.pca$x)
+pca_components <- pca_components[, -ncol(pca_components)]
+lda_model <- lda(falls_all ~ ., data = as.data.frame(pca_components)[,1:100])
+```
+
+```{r}
+# Predict LD1 values (discriminant scores)
+lda_pred <- predict(lda_model)
+lda_values <- lda_pred$x
+
+adjusted_posterior <- lda_pred$posterior[, 2] * 1 #(0.92 / 0.08)
+
+adjusted_class <- ifelse(adjusted_posterior > 0.5, 1, 0)
+
+# Create a data frame with LD1 and the class labels
+lda_df <- data.frame(LD1 = lda_values[, 1], Class = falls_all)
+# Create a data frame with PCA and the class labels
+pca_df <- data.frame(PC1 = pca_components[, 1], Class = falls_all)
+
+# Plot PC1 values with class labels
+ggplot(pca_df, aes(x = PC1, y = as.factor(Class), color = as.factor(Class))) +
+  geom_point(size = 3) +
+  labs(title = "Scatter Plot of LD1 Values and Class Labels", 
+       x = "PC1", 
+       y = "Class", 
+       color = "Class") +
+  theme_minimal() +
+  scale_color_manual(values = c("red", "blue"))  # Custom colors for classes
+
+# Plot LD1 values with class labels
+ggplot(lda_df, aes(x = LD1, y = as.factor(Class), color = as.factor(Class))) +
+  geom_point(size = 3) +
+  labs(title = "Scatter Plot of LD1 Values and Class Labels", 
+       x = "LD1", 
+       y = "Class", 
+       color = "Class") +
+  theme_minimal() +
+  scale_color_manual(values = c("red", "blue"))  # Custom colors for classes
+
+# Plot PC1 desnity
+ggplot(pca_df, aes(x = PC1, fill = Class)) +
+  geom_density(alpha = 0.5) +  # Overlay density plot
+  labs(title = "Class Separation along PC1", x = "PC1", y = "Density") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Custom colors for each class
+
+# Plot LD1 desnity
+ggplot(lda_df, aes(x = LD1, fill = Class)) +
+  geom_density(alpha = 0.5) +  # Overlay density plot
+  labs(title = "Class Separation along LD1", x = "LD1", y = "Density") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Custom colors for each class
+
+```
+
+```{r}
+confusion_matrix <- table(falls_all, adjusted_class)
+print(confusion_matrix)
+```

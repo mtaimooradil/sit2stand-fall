@@ -1,0 +1,217 @@
+---
+title: "Sampling"
+output: html_notebook
+---
+
+
+```{r}
+
+library("smotefamily")
+library(ggplot2)
+all_data <- na.omit(read.csv("../../stats/dataClean2.csv"))
+all_data$fallsBin <- as.factor(all_data$fallsBin)
+set.seed(123)
+adasyn_result <- ADAS(all_data[, -ncol(all_data)], all_data$fallsBin, K = 5)
+adasyn_data <- adasyn_result$data
+ggplot(all_data, aes(x = fallsBin)) +
+  geom_bar() +
+  labs(title = "Class Distribution Before ADASYN", x = "Class", y = "Count") +
+  theme_minimal()
+ggplot(adasyn_data, aes(x = class)) +
+  geom_bar() +
+  labs(title = "Class Distribution After ADASYN", x = "Class", y = "Count") +
+  theme_minimal()
+```
+```{r}
+
+library(caret)
+library(pROC)
+
+set.seed(123)  
+trainIndex <- createDataPartition(adasyn_data$class, p = 0.7, list = FALSE)
+train_data <- adasyn_data[trainIndex, ]
+test_data <- adasyn_data[-trainIndex, ]
+
+train_data$class <- as.numeric(as.character(train_data$class))
+test_data$class <- as.numeric(as.character(test_data$class))
+
+x_train <- as.matrix(train_data[, -ncol(train_data)])
+y_train <- train_data$class
+x_test <- as.matrix(test_data[, -ncol(test_data)])
+y_test <- test_data$class
+
+glm_model <- glm(class ~ ., data = train_data, family = binomial)
+glmnet_model <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 0.5)  # alpha = 1 for Lasso
+
+#test_pred_prob <- predict(glmnet_model, newdata = test_data, type = "response")
+test_pred_prob <- predict(glmnet_model, newx = x_test, type = "response", s = "lambda.min")
+test_pred_class <- ifelse(test_pred_prob > 0.5, 1, 0)
+
+#conf_matrix <- confusionMatrix(as.factor(test_pred_class), as.factor(test_data$class), positive = "1")
+conf_matrix <- confusionMatrix(as.factor(test_pred_class), as.factor(y_test), positive = "1")
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+f1_score <- conf_matrix$byClass['F1']
+roc_curve <- roc(test_data$class, test_pred_prob)
+auc_value <- auc(roc_curve)
+
+cat("Accuracy: ", accuracy, "\n")
+cat("Sensitivity: ", sensitivity, "\n")
+cat("Specificity: ", specificity, "\n")
+cat("F1 Score: ", f1_score, "\n")
+cat("AUC: ", auc_value, "\n")
+```
+
+
+```{r}
+# Convert target to numeric if necessary (0 and 1)
+all_data$fallsBin <- as.numeric(as.character(all_data$fallsBin))
+
+# Split the original imbalanced data into training and test sets (80/20 split)
+set.seed(123)  # for reproducibility
+trainIndex <- createDataPartition(all_data$fallsBin, p = 0.8, list = FALSE)
+train_data_orig <- all_data[trainIndex, ]
+test_data_orig <- all_data[-trainIndex, ]
+
+# Prepare data for glmnet from original imbalanced dataset
+x_train_orig <- as.matrix(train_data_orig[, -ncol(train_data_orig)])  # Predictors for training
+y_train_orig <- train_data_orig$fallsBin  # Response for training
+
+x_test_orig <- as.matrix(test_data_orig[, -ncol(test_data_orig)])  # Predictors for testing
+y_test_orig <- test_data_orig$fallsBin  # Response for testing
+
+### 1. Fit a glmnet model (logistic regression with regularization) on the original imbalanced dataset
+
+set.seed(123)  # for reproducibility
+glmnet_model_orig <- cv.glmnet(x_train_orig, y_train_orig, family = "binomial", alpha = 0.7)  # Lasso
+
+# Predict on the original test set
+test_pred_prob_orig <- predict(glmnet_model_orig, newx = x_test_orig, type = "response", s = "lambda.min")
+test_pred_class_orig <- ifelse(test_pred_prob_orig > 0.5, 1, 0)
+
+# Confusion Matrix on original data
+conf_matrix_orig <- confusionMatrix(as.factor(test_pred_class_orig), as.factor(y_test_orig), positive = "1")
+
+# Extract performance metrics
+accuracy_orig <- conf_matrix_orig$overall['Accuracy']
+sensitivity_orig <- conf_matrix_orig$byClass['Sensitivity']
+specificity_orig <- conf_matrix_orig$byClass['Specificity']
+f1_score_orig <- conf_matrix_orig$byClass['F1']
+
+# AUC on original data
+roc_curve_orig <- roc(y_test_orig, test_pred_prob_orig)
+auc_value_orig <- auc(roc_curve_orig)
+
+
+### 2. Apply ADASYN only on the training set
+
+# ADASYN on the training set
+set.seed(123)  # for reproducibility
+adasyn_result <- ADAS(train_data_orig[, -ncol(train_data_orig)], train_data_orig$fallsBin, K = 5)
+train_data_adasyn <- adasyn_result$data
+train_data_adasyn$class <- as.numeric(as.character(train_data_adasyn$class))  # Ensure class is numeric
+
+# Prepare data for glmnet from ADASYN oversampled training set
+x_train_adasyn <- as.matrix(train_data_adasyn[, -ncol(train_data_adasyn)])  # Predictors for training
+y_train_adasyn <- train_data_adasyn$class  # Response for training
+
+# Fit a glmnet model on the ADASYN training set
+glmnet_model_adasyn <- cv.glmnet(x_train_adasyn, y_train_adasyn, family = "binomial", alpha = 0.7)  # Lasso
+
+# Predict on the original test set (imbalanced test set)
+test_pred_prob_adasyn <- predict(glmnet_model_adasyn, newx = x_test_orig, type = "response", s = "lambda.min")
+test_pred_class_adasyn <- ifelse(test_pred_prob_adasyn > 0.5, 1, 0)
+
+# Confusion Matrix on original test set using ADASYN trained model
+conf_matrix_adasyn <- confusionMatrix(as.factor(test_pred_class_adasyn), as.factor(y_test_orig), positive = "1")
+
+# Extract performance metrics
+accuracy_adasyn <- conf_matrix_adasyn$overall['Accuracy']
+sensitivity_adasyn <- conf_matrix_adasyn$byClass['Sensitivity']
+specificity_adasyn <- conf_matrix_adasyn$byClass['Specificity']
+f1_score_adasyn <- conf_matrix_adasyn$byClass['F1']
+
+# AUC on original test data with ADASYN model
+roc_curve_adasyn <- roc(y_test_orig, test_pred_prob_adasyn)
+auc_value_adasyn <- auc(roc_curve_adasyn)
+
+
+### 3. Print and compare the results
+
+cat("Original Data - Accuracy: ", accuracy_orig, "\n")
+cat("Original Data - Sensitivity: ", sensitivity_orig, "\n")
+cat("Original Data - Specificity: ", specificity_orig, "\n")
+cat("Original Data - F1 Score: ", f1_score_orig, "\n")
+cat("Original Data - AUC: ", auc_value_orig, "\n\n")
+
+cat("ADASYN (Train) - Accuracy: ", accuracy_adasyn, "\n")
+cat("ADASYN (Train) - Sensitivity: ", sensitivity_adasyn, "\n")
+cat("ADASYN (Train) - Specificity: ", specificity_adasyn, "\n")
+cat("ADASYN (Train) - F1 Score: ", f1_score_adasyn, "\n")
+cat("ADASYN (Train) - AUC: ", auc_value_adasyn, "\n")
+```
+
+```{r}
+library(xgboost)
+# Prepare data for XGBoost (ensure fallsBin is numeric)
+train_data_orig$fallsBin <- as.numeric(train_data_orig$fallsBin)  # Training response
+test_data_orig$fallsBin <- as.numeric(test_data_orig$fallsBin)  # Testing response
+
+# Separate predictors and target variable for training and test sets
+x_train <- as.matrix(train_data_orig[, -ncol(train_data_orig)])  # Training predictors
+y_train <- train_data_orig$fallsBin  # Training response
+
+x_test <- as.matrix(test_data_orig[, -ncol(test_data_orig)])  # Test predictors
+y_test <- test_data_orig$fallsBin  # Test response
+
+scale_pos_weight <- sum(y_train == 0) / sum(y_train == 1)
+xgb_model <- xgboost(
+  data = x_train,
+  label = y_train,
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  scale_pos_weight = scale_pos_weight,  # Class weight handling
+  nrounds = 100,  # Number of boosting rounds
+  max_depth = 6,  # Tree depth
+  eta = 0.03,  # Learning rate
+  verbose = 0  # Silent
+)
+# Predict on the test set
+test_pred_prob_xgb <- predict(xgb_model, newdata = x_test)
+test_pred_class_xgb <- ifelse(test_pred_prob_xgb > 0.5, 1, 0)
+
+# Confusion Matrix on the test set
+conf_matrix_xgb <- confusionMatrix(as.factor(test_pred_class_xgb), as.factor(y_test), positive = "1")
+
+# Extract performance metrics
+accuracy_xgb <- conf_matrix_xgb$overall['Accuracy']
+sensitivity_xgb <- conf_matrix_xgb$byClass['Sensitivity']
+specificity_xgb <- conf_matrix_xgb$byClass['Specificity']
+f1_score_xgb <- conf_matrix_xgb$byClass['F1']
+
+# AUC on the test set
+roc_curve_xgb <- roc(y_test, test_pred_prob_xgb)
+auc_value_xgb <- auc(roc_curve_xgb)
+
+# Print the results
+cat("XGBoost - Accuracy: ", accuracy_xgb, "\n")
+cat("XGBoost - Sensitivity: ", sensitivity_xgb, "\n")
+cat("XGBoost - Specificity: ", specificity_xgb, "\n")
+cat("XGBoost - F1 Score: ", f1_score_xgb, "\n")
+cat("XGBoost - AUC: ", auc_value_xgb, "\n")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,264 @@
+---
+title: "Feature Selection"
+output: html_notebook
+---
+
+# Loading Libraries
+
+```{r}
+library(Boruta)
+library(caret)
+library(randomForest)
+library(logistf)
+library(pROC)  # For AUC
+library(caret) # For confusion matrix and other metrics
+library(glmnet)
+```
+
+# Loading Data
+
+There are two types of data. One contains all the data including demographic information, scale/questionnaire scores and activity level information. Other only contains information about kinematic data for sit to stand motion. The main purpose is to understand the influence of kinematic factors with other factors and as standalone predictors as well.
+
+```{r}
+all_data_path <- "../../stats/dataClean2.csv"
+kinematic_data_path <- "../../stats/kinematic_features.csv"
+all_data <- na.omit(read.csv(all_data_path))
+all_data <- all_data[, c(1:ncol(all_data))]
+# all_data$fallsBin <- as.factor(all_data$fallsBin)
+kinematic_data <- na.omit(read.csv(kinematic_data_path))
+kinematic_data <- kinematic_data[, c(1:ncol(kinematic_data))]
+summary_all_data <- as.data.frame.matrix(summary(all_data))
+summary_kinematic_data <- as.data.frame.matrix(summary(kinematic_data))
+head(all_data)
+head(kinematic_data)
+summary_all_data
+summary_kinematic_data
+```
+
+# Boruta
+
+Boruta is a randomized wrapper feature selection method which utilizes random forest classification to output variable importance measures.
+
+vs\<-Boruta(class\~features, data=Mydata, pValue = 0.01, mcAdj =TRUE, maxRuns = 100, doTrace=0, getImp = getImpRfZ, ...)
+
+```{r}
+set.seed(123)
+# data3 <- all_data[, c("fallsBin", predRFE)]
+# boruta_all <- Boruta(fallsBin ~ ., data=all_data, pValue=0.05, maxRuns = 1000, doTrace=0)
+# boruta_all <- Boruta(fallsBin ~ ., data=data3, pValue=0.05, maxRuns = 1000, doTrace=0)
+boruta_kinematic <- Boruta(fallsBin ~ ., data=kinematic_data, pValue=0.05, maxRuns = 1000, doTrace=0)
+# print(boruta_all)
+# print("----------")
+print(boruta_kinematic)
+```
+
+```{r}
+boruta_signif_all <- getSelectedAttributes(boruta_all, withTentative = TRUE)
+boruta_signif_kinematic <- getSelectedAttributes(boruta_kinematic, withTentative = TRUE)
+print(boruta_signif_all)
+print('-----------')
+print(boruta_signif_kinematic)
+```
+
+```{r}
+# Imp_hist_all<- lapply(
+#   1:ncol(boruta_all$ImpHistory),
+#   function(i) {
+#   boruta_all$ImpHistory[is.finite(boruta_all$ImpHistory[, i]), i]
+# })
+# # names(Imp_hist_all)<-colnames(boruta_all$ImpHistory)
+# # Imp_hist_all <- as.data.frame(Imp_hist_all)
+# # Imp_hist_all_selected <- Imp_hist_all[, boruta_signif_all, drop = FALSE]
+# # 
+# Imp_hist_kinematic<- lapply(
+#   1:ncol(boruta_kinematic$ImpHistory),
+#   function(i) {
+#   boruta_kinematic$ImpHistory[is.finite(boruta_kinematic$ImpHistory[, i]), i]
+# })
+# names(Imp_hist_kinematic)<-colnames(boruta_kinematic$ImpHistory)
+# Imp_hist_kinematic <- as.data.frame(Imp_hist_kinematic)
+# Imp_hist_kinematic_selected <- Imp_hist_kinematic[, boruta_signif_kinematic, drop = FALSE]
+
+#summary_lz <- data.frame(unclass(summary(lz)), check.names = FALSE)
+#summary_lz <- data.frame(do.call(cbind, lapply(lz, summary)))
+#names(lz)<-colnames(boruta_all$ImpHistory)
+#lb<-sort(sapply(lz, median))
+
+
+importance_history <- function(boruta_data) {
+  
+  boruta_signif <- getSelectedAttributes(boruta_data, withTentative = TRUE)
+  
+  imp_history <- as.data.frame(boruta_data$ImpHistory)
+  
+  names(imp_history)<-colnames(boruta_data$ImpHistory)
+  
+  imp_history_selected <- imp_history[, boruta_signif, drop = FALSE]
+  
+  # Calculate the median of each column
+  col_medians <- apply(imp_history_selected, 2, median)
+  
+  # Sort the dataframe by column medians (in ascending order)
+  imp_history_selected  <- imp_history_selected[, order(col_medians)]
+  
+  return(imp_history_selected)
+}
+
+imp_hist_all <- importance_history(boruta_all)
+imp_hist_kinematic <- importance_history(boruta_kinematic)
+
+write.csv(imp_hist_all, "imp_hist_all_falls.csv", row.names = TRUE)
+write.csv(imp_hist_kinematic, "imp_hist_kinematic_falls.csv", row.names = TRUE)
+
+
+```
+
+```{r}
+par(family = "Arial", cex.axis = 0.8)
+boxplot(imp_hist_all, names = boruta_signif_all, ylab="Importance", las=2)
+
+```
+
+```{r}
+imp_all <- boruta_kinematic$ImpHistory[1:14,]
+
+# Calculate the median of each column
+col_medians <- apply(imp_all, 2, median)
+
+# Sort the dataframe by column medians (in ascending order)
+imp_all  <- imp_all[, order(col_medians)]
+
+write.csv(imp_all, "imp_kinematic.csv", row.names = TRUE)
+
+```
+
+```{r}
+shadow_max_all <- as.data.frame(boruta_all$ImpHistory)[, "shadowMax", drop=FALSE]
+shadow_min_all <-as.data.frame(boruta_all$ImpHistory)[, "shadowMin", drop=FALSE]
+shadow_all <- as.data.frame(c(shadow_max_all, shadow_min_all))
+write.csv(shadow_all, "shadow_all.csv", row.names=TRUE)
+
+shadow_max_kinematic <- as.data.frame(boruta_kinematic$ImpHistory)[, "shadowMax", drop=FALSE]
+shadow_min_kinematic <-as.data.frame(boruta_kinematic$ImpHistory)[, "shadowMin", drop=FALSE]
+shadow_kinematic <- as.data.frame(c(shadow_max_kinematic, shadow_min_kinematic))
+write.csv(shadow_kinematic, "shadow_kinematic.csv", row.names=TRUE)
+```
+
+```{r}
+final_boruta_all<-TentativeRoughFix(boruta_all)
+final_boruta_kinematic<-TentativeRoughFix(boruta_kinematic)
+print(final_boruta_all)
+print(final_boruta_kinematic)
+```
+
+```{r}
+decision_boruta_all <- as.data.frame(final_boruta_all$finalDecision)
+decision_boruta_kinematic <- as.data.frame(final_boruta_kinematic$finalDecision)
+```
+
+```{r}
+getConfirmedFormula(final_boruta_all)
+getConfirmedFormula(final_boruta_kinematic)
+```
+
+```{r}
+print(as.data.frame(final_boruta_all$finalDecision[final_boruta_all$finalDecision %in% c("Confirmed","Tentative")]))
+print(as.data.frame(final_boruta_kinematic$finalDecision[final_boruta_kinematic$finalDecision %in% c("Confirmed","Tentative")]))
+```
+
+```{r}
+impBoruta_all <- final_boruta_all$finalDecision[final_boruta_all$finalDecision %in%
+c("Confirmed")]; length(impBoruta_all)
+impBoruta_kinematic <- final_boruta_kinematic$finalDecision[final_boruta_kinematic$finalDecision %in%
+c("Confirmed")]; length(impBoruta_kinematic)
+```
+
+## Comparison with Recursive Feature Elimination
+
+```{r}
+set.seed(123)
+
+
+features <- all_data[, -ncol(all_data)]  # All columns except the last one
+target <- as.factor(all_data[, ncol(all_data)])  # The last column as target
+
+class_counts <- table(target)
+class_weights <- c(class_counts[1], class_counts[2])
+names(class_weights) <- levels(target)
+
+
+rfFuncs$fit <- function(x, y, first, last, ...) {
+  randomForest(x, y, classwt = class_weights, ...)
+}
+
+customSummary <- function(data, lev = NULL, model = NULL) {
+  cm <- confusionMatrix(data$obs, data$pred)
+  out <- c(specificity = cm$byClass["Specificity"])
+  return(out)
+}
+
+
+rfFuncs$summary <- twoClassSummary
+control<-rfeControl(functions = rfFuncs, method = "cv", number=10, verbose=TRUE)
+rf_train<-rfe(features, target, sizes = c(1:20), rfeControl = control)
+rf_train
+```
+
+```{r}
+plot(rf_train, type=c("g", "o"), cex=1, col=1:5)
+```
+
+```{r}
+predRFE <- predictors(rf_train)
+predBoruta <- getSelectedAttributes(final_boruta_all, withTentative = FALSE)
+```
+
+## Comparing with Stepwise Feature Selection
+
+```{ights <- ifelse(y == 1, 371/34, 1)  # Inverse class frequency as weights}
+
+
+# Fit Elastic Net with weights
+cv_fit_weighted <- cv.glmnet(X, y, family = "binomial", alpha = 0.5, weights = class_weights)
+
+# Best lambda from cross-validation
+best_lambda_weighted <- cv_fit_weighted$lambda.min
+
+# Final model with best lambda
+elastic_net_weighted <- glmnet(X, y, family = "binomial", alpha = 0.5, lambda = best_lambda_weighted, weights = class_weights)
+
+```
+
+```{r}
+predictions_prob <- predict(full_model, newx = X, type = "response")
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Convert the actual labels (y) to factor for comparison
+actual_labels <- as.factor(y)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(as.factor(predictions), actual_labels)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+cat("Elastic Net Model Evaluation Metrics:\n")
+cat("Accuracy:", accuracy, "\n")
+cat("Sensitivity:", sensitivity, "\n")
+cat("Specificity:", specificity, "\n")
+cat("Precision:", precision, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("AUC:", auc, "\n")
+
+```

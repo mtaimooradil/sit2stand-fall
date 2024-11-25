@@ -1,0 +1,86 @@
+---
+title: "Stepwise Logistic Regression"
+output: html_notebook
+---
+
+```{r}
+library(Boruta)
+library(caret)
+library(randomForest)
+library(logistf)
+library(pROC)  # For AUC
+library(caret) # For confusion matrix and other metrics
+library(glmnet)
+library(car)
+library(corrplot)
+```
+
+```{r}
+all_data_path <- "../../stats/dataClean2.csv"
+kinematic_data_path <- "../../stats/kinematic_features.csv"
+all_data <- na.omit(read.csv(all_data_path))
+all_data <- all_data[, c(1:ncol(all_data))]
+# all_data$fallsBin <- as.factor(all_data$fallsBin)
+kinematic_data <- na.omit(read.csv(kinematic_data_path))
+kinematic_data <- kinematic_data[, c(1:ncol(kinematic_data))]
+summary_all_data <- as.data.frame.matrix(summary(all_data))
+summary_kinematic_data <- as.data.frame.matrix(summary(kinematic_data))
+head(all_data)
+head(kinematic_data)
+summary_all_data
+summary_kinematic_data
+```
+
+```{r}
+# Create class weights (higher weight for minority class)
+y <- as.factor(all_data$fallsBin)
+X <- as.matrix(all_data[, colnames(all_data) != "fallsBin"])
+class_weights <- ifelse(y == 1, 371/34, 1)  # Inverse class frequency as weights
+fullmod <- glmnet(X, y, alpha = 0.5, family="binomial", weights = class_weights)
+```
+
+```{r}
+mc <- model.matrix(y ~ . - 1, data = all_data)
+condition_number <- kappa(X)
+print(condition_number)
+```
+
+```{r}
+data_predictors <- all_data[, !(names(all_data) %in% "fallsBin")]
+# Step 4: Filter only numeric columns from the predictors
+data_predictors <- data_predictors[, sapply(data_predictors, is.numeric)]
+cor_matrix <- cor(data_predictors, use = "pairwise.complete.obs")
+print("Correlation matrix:")
+print(cor_matrix)
+corrplot(cor_matrix, method = "circle")
+cor_threshold <- 0.8
+high_cor <- which(abs(cor_matrix) > cor_threshold & row(cor_matrix) != col(cor_matrix), arr.ind = TRUE)
+print("Highly correlated variable pairs (correlation > 0.8):")
+print(high_cor)
+vars_to_remove <- character()
+# Loop through each pair of highly correlated variables and keep track of one from each pair
+for (i in seq_len(nrow(high_cor))) {
+  var1 <- rownames(cor_matrix)[high_cor[i, 1]]
+  var2 <- colnames(cor_matrix)[high_cor[i, 2]]
+  
+  # Add one variable to the list of variables to remove (e.g., var2)
+  if (!(var2 %in% vars_to_remove)) {
+    vars_to_remove <- c(vars_to_remove, var2)
+  }
+}
+print("Variables to be removed due to high correlation:")
+print(vars_to_remove)
+
+# Step 9: Create a new dataset without the highly correlated variables
+data_reduced <- data_predictors[, !(names(data_predictors) %in% vars_to_remove)]
+print("Data after removing highly correlated variables:")
+print(names(data_reduced))
+
+# Step 10: Check the condition number of the reduced dataset (optional)
+# Create the design matrix for the reduced dataset (without the output variable)
+X_reduced <- model.matrix(~ ., data = data_reduced)
+
+# Calculate the condition number
+condition_number_reduced <- kappa(X_reduced)
+print(paste("Condition number after removing highly correlated variables:", condition_number_reduced))
+```

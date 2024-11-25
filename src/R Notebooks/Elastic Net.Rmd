@@ -1,0 +1,836 @@
+------------------------------------------------------------------------
+
+---
+title: "Elastic Net"
+output: html_notebook
+---
+
+```{r}
+library(Boruta)
+library(caret)
+library(randomForest)
+library(logistf)
+library(pROC)  # For AUC
+library(glmnet)
+library(boot)
+library(dplyr)  # For data manipulation
+library(rpart)  # For decision tree
+library(car)  # For VIF
+library(smotefamily)
+library(foreach)
+library(doParallel)
+```
+
+```{r}
+all_data_path <- "../../stats/dataClean2.csv"
+kinematic_data_path <- "../../stats/kinematic_features.csv"
+all_data <- na.omit(read.csv(all_data_path))
+all_data <- all_data[, c(1:ncol(all_data))]
+# all_data$fallsBin <- as.factor(all_data$fallsBin)
+kinematic_data <- na.omit(read.csv(kinematic_data_path))
+kinematic_data <- kinematic_data[, c(1:ncol(kinematic_data))]
+summary_all_data <- as.data.frame.matrix(summary(all_data))
+summary_kinematic_data <- as.data.frame.matrix(summary(kinematic_data))
+head(all_data)
+head(kinematic_data)
+summary_all_data
+summary_kinematic_data
+```
+
+### Test and Train Data
+
+```{r}
+# Shuffle the data
+set.seed(123)
+shuffled_data <- kinematic_data[sample(nrow(kinematic_data)), ]
+
+# Split the data into training (70%) and testing (30%)
+train_index <- createDataPartition(shuffled_data$fallsBin, p = 1.0, list = FALSE)
+train_data <- shuffled_data[train_index, ]
+test_data <- shuffled_data[-train_index, ]
+```
+
+```{r}
+# Separate predictors and response
+y <- train_data$fallsBin
+X <- as.matrix(data[, colnames(train_data) != "fallsBin"])
+y_test <- test_data$fallsBin
+X_test <- as.matrix(test_data[, colnames(test_data) != "fallsBin"])
+```
+
+### Bootstrapping for feature selection 
+
+```{r}
+# Detect the number of available cores
+num_cores <- detectCores() - 1  # Reserve one core for system tasks
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+```
+
+```{r}
+# Number of bootstrap samples
+n_bootstraps <- 100
+
+# Define the tuning grid for alpha (Elastic Net mixing parameter)
+tune_grid <- expand.grid(
+  alpha = seq(0, 1, by = 0.1),  # Search alpha from 0 (Ridge) to 1 (Lasso)
+  lambda = 10^seq(-4, , length = 100)
+)
+
+# Set up cross-validation control
+train_control <- trainControl(
+  method = "cv",           # Use k-fold cross-validation
+  number = 5,              # Number of folds for cross-validation
+  verboseIter = TRUE       # Show progress during training
+)
+
+# Class weights for handling imbalanced classes
+class_weights <- ifelse(y == 1, 15, 1)  # Adjust the weights if needed for imbalanced data
+
+# Prepare to store results from bootstrapping
+coefficients_matrix <- array(0, dim = c(n_bootstraps, ncol(X), length(tune_grid$alpha)))
+selection_frequency <- matrix(0, ncol = ncol(X), nrow = length(tune_grid$alpha))
+
+# Loop over bootstraps
+results <- foreach(i = 1:n_bootstraps, .combine = 'rbind', .packages = c("glmnet", "caret")) %dopar% {
+  set.seed(i)  # Set seed for reproducibility
+  
+  # Bootstrap sampling
+  boot_sample <- sample(1:nrow(X), replace = TRUE)
+  X_boot <- X[boot_sample, ]
+  y_boot <- y[boot_sample]
+  
+  # Convert the outcome variable to a factor for classification
+  y_boot <- as.factor(y_boot)
+  
+  # Perform grid search with cross-validation using caret for the bootstrap sample
+  enet_model <- train(
+    x = X_boot,                # Bootstrap sample of the feature matrix
+    y = y_boot,                # Bootstrap sample of the response variable
+    method = "glmnet",         # Specify glmnet (Elastic Net)
+    trControl = train_control, # Cross-validation control
+    tuneGrid = tune_grid,      # The grid of alpha values to search
+    family = "binomial",       # Binary classification (for logistic regression)
+    weights = class_weights    # Class weights for imbalanced data
+  )
+  
+  # Get the best alpha and lambda for this bootstrap sample
+  best_alpha <- enet_model$bestTune$alpha
+  best_lambda <- enet_model$bestTune$lambda
+  
+  # Fit the final model on the bootstrapped data with the best alpha and lambda
+  final_model <- glmnet(X_boot, y_boot, family = "binomial", alpha = best_alpha, lambda = best_lambda, weights=class_weights)
+  
+  # Extract coefficients using the best lambda
+  final_coefficients <- as.matrix(coef(final_model))
+  
+  # Store the coefficients for the current bootstrap iteration (excluding intercept)
+  coefficients_matrix[i, , which(tune_grid$alpha == best_alpha)] <- final_coefficients[-1]
+  
+  # Track selection frequency (non-zero coefficients)
+  selection_frequency[which(tune_grid$alpha == best_alpha), ] <- 
+    selection_frequency[which(tune_grid$alpha == best_alpha), ] + (final_coefficients[-1] != 0)
+}
+
+# Calculate average coefficients for each predictor and alpha across bootstraps
+average_coefficients <- apply(coefficients_matrix, c(2, 3), mean)
+
+# Calculate selection frequency (proportion of times a feature was selected) for each alpha
+selection_frequency <- selection_frequency / n_bootstraps
+
+# Select the best alpha by maximizing average selection frequency across features
+best_alpha_idx <- which.max(rowMeans(selection_frequency))
+best_alpha <- tune_grid$alpha[best_alpha_idx]
+
+# Extract final selection frequency and coefficients for the best alpha
+final_selection_frequency <- selection_frequency[best_alpha_idx, ]
+final_average_coefficients <- average_coefficients[, best_alpha_idx]
+
+# Combine selection frequency and average coefficients for the best alpha
+results <- data.frame(
+  Predictor = colnames(X),
+  Selection_Frequency = final_selection_frequency,
+  Average_Coefficient = final_average_coefficients
+)
+
+# Sort by selection frequency
+results_sorted <- results[order(-results$Selection_Frequency), ]
+
+# Print the top features based on selection frequency
+print("Top features sorted by selection frequency:")
+print(head(results_sorted))
+
+# Plot top 10 feature weights for the best alpha
+elastic_net_coefficients <- as.data.frame(as.matrix(final_average_coefficients))
+names(elastic_net_coefficients) <- "Weight"
+elastic_net_coefficients$Feature <- colnames(X)
+
+# Remove intercept from the coefficients
+elastic_net_coefficients <- elastic_net_coefficients[elastic_net_coefficients$Feature != "(Intercept)", ]
+
+# Sort by absolute weight and select the top 10 features
+top_10_features <- elastic_net_coefficients[order(abs(elastic_net_coefficients$Weight), decreasing = TRUE), ][1:10, ]
+
+# Plot top 10 feature weights using ggplot2
+ggplot(top_10_features, aes(x = reorder(Feature, Weight), y = Weight, fill = Weight > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Feature Weights in Elastic Net Model", x = "Feature", y = "Coefficient Weight") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Optional: color for negative and positive weights
+
+```
+
+```{r}
+stopCluster(cl)
+```
+
+
+```{r}
+
+y <- kinematic_data$fallsBin
+X <- as.matrix(data[, colnames(kinematic_data) != "fallsBin"])
+
+# Set Elastic Net alpha value (0 = Ridge, 1 = Lasso, 0.5 = Elastic Net)
+alpha <- 0.7
+
+class_weights <- ifelse(y == 1, 15, 1)
+
+# Number of bootstrap samples
+n_bootstraps <- 100
+
+# Bootstrap Elastic Net model fitting
+results <- foreach(i = 1:n_bootstraps, .combine = 'c', .packages = c("glmnet", "caret")) %dopar% {
+  # Bootstrap sampling
+  set.seed(i)
+  boot_sample <- sample(1:nrow(X), replace = TRUE)
+  X_boot <- X[boot_sample, ]
+  y_boot <- y[boot_sample]
+  
+  # Resample class weights
+  boot_weights <- class_weights[boot_sample]
+  
+  # Fit Elastic Net model with cross-validation
+  cv_fit <- cv.glmnet(X_boot, y_boot, family = "binomial", alpha = alpha, weights=boot_weights)
+  
+  
+  # Get the coefficients for the best lambda
+  best_lambda <- cv_fit$lambda.min
+  coef_fit <- as.matrix(coef(cv_fit, s = best_lambda))
+  
+  # Return coefficients and selection count (excluding the intercept)
+  list(coefficients = coef_fit[-1], selection = as.integer(coef_fit[-1] != 0))
+}
+
+# Now, `results` is a flat list, so we need to reshape it
+# Convert the flat list back to a list of lists (where each element is a list of `coefficients` and `selection`)
+reshaped_results <- split(results, rep(1:n_bootstraps, each = 2))
+
+# Extract and combine the coefficients and selection vectors across all bootstrap iterations
+coefficients_matrix <- do.call(rbind, lapply(reshaped_results, function(x) x[[1]]))  # First element is coefficients
+selection_matrix <- do.call(rbind, lapply(reshaped_results, function(x) x[[2]]))    # Second element is selection
+
+# Calculate average coefficient for each predictor
+average_coefficients <- apply(coefficients_matrix, 2, mean)
+
+# Calculate selection frequency (proportion of times a feature was selected)
+selection_frequency <- apply(selection_matrix, 2, mean)
+
+# Combine selection frequency and average coefficients
+results_df <- data.frame(
+  Predictor = colnames(X),
+  Selection_Frequency = selection_frequency,
+  Average_Coefficient = average_coefficients
+)
+
+# Print the result
+print(results_df)
+
+# Sort by selection frequency
+results_sorted <- results_df[order(-results_df$Selection_Frequency), ]
+
+# Display the top features
+head(results_sorted)
+
+# Assuming coefficients of elastic_net_model are stored in elastic_net_coefficients
+elastic_net_coefficients <- as.data.frame(as.matrix(average_coefficients))
+names(elastic_net_coefficients) <- "Weight"
+elastic_net_coefficients$Feature <- colnames(train_data[, -ncol(train_data)])
+elastic_net_coefficients <- elastic_net_coefficients[elastic_net_coefficients$Feature != "(Intercept)", ]
+
+# Sort by absolute weight and select the top 10 features
+top_10_features <- elastic_net_coefficients[order(abs(elastic_net_coefficients$Weight), decreasing = TRUE), ][1:10, ]
+
+# Plot top 10 feature weights
+ggplot(top_10_features, aes(x = reorder(Feature, Weight), y = Weight, fill = Weight > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Feature Weights in Elastic Net Model", x = "Feature", y = "Coefficient Weight") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Optional: color for negative and positive weights
+
+# Set a threshold for selection frequency (e.g., 70%)
+selection_threshold <- 0.5
+selected_features <- results_df[results_df$Selection_Frequency >= selection_threshold, ]
+
+# Rank the remaining features by absolute average coefficient
+selected_features <- selected_features[order(-abs(selected_features$Average_Coefficient)), ]
+
+print(selected_features)
+
+```
+
+```
+```{r}
+# Set a threshold for selection frequency (e.g., 70%)
+selection_threshold <- 0.5
+selected_features <- results_df[results_df$Selection_Frequency >= selection_threshold, ]
+
+# Rank the remaining features by absolute average coefficient
+selected_features <- selected_features[order(-abs(selected_features$Average_Coefficient)), ]
+```
+
+```{r}
+# Set Elastic Net alpha value (0 = Ridge, 1 = Lasso, 0.5 = Elastic Net)
+alpha <- 0.7
+
+# Different values of n_bootstraps to evaluate
+n_bootstraps_list <- c(1, 2, 3)
+
+# Initialize an empty data frame to store results for different n_bootstraps
+final_results <- data.frame()
+
+# Loop over different n_bootstraps values
+for (n_bootstraps in n_bootstraps_list) {
+  
+  # Store the coefficients for current n_bootstraps
+  coefficients_matrix <- matrix(0, nrow = n_bootstraps, ncol = ncol(X))
+  
+  # Store the selection frequency for current n_bootstraps
+  selection_frequency <- numeric(ncol(X))
+  
+  # Bootstrap Elastic Net model fitting
+  for (i in 1:n_bootstraps) {
+    # Bootstrap sampling
+    set.seed(i)
+    boot_sample <- sample(1:nrow(X), replace = TRUE)
+    X_boot <- X[boot_sample, ]
+    y_boot <- y[boot_sample]
+    
+    # Fit Elastic Net model with cross-validation
+    cv_fit <- cv.glmnet(X_boot, y_boot, family = "binomial", alpha = alpha)
+    
+    # Get the coefficients for the best lambda
+    best_lambda <- cv_fit$lambda.min
+    coef_fit <- as.matrix(coef(cv_fit, s = best_lambda))
+    
+    # Store coefficients (excluding the intercept)
+    coefficients_matrix[i, ] <- coef_fit[-1]
+    
+    # Track if the feature was selected (non-zero coefficient)
+    selection_frequency <- selection_frequency + (coef_fit[-1] != 0)
+  }
+  
+  # Calculate average coefficient for each predictor
+  average_coefficients <- apply(coefficients_matrix, 2, mean)
+  
+  # Calculate selection frequency (proportion of times a feature was selected)
+  selection_frequency <- selection_frequency / n_bootstraps
+  
+  # Combine selection frequency and average coefficients
+  results <- data.frame(
+    Predictor = colnames(X),
+    Selection_Frequency = selection_frequency,
+    Average_Coefficient = average_coefficients
+  )
+  
+  # Add the current value of n_bootstraps to the results
+  results$n_bootstraps <- n_bootstraps
+  
+  # Append the results to the final_results data frame
+  final_results <- rbind(final_results, results)
+}
+
+# Print the final results
+print(final_results)
+
+# Sort the final results by selection frequency within each n_bootstraps
+final_results_sorted <- final_results[order(final_results$n_bootstraps, -final_results$Selection_Frequency), ]
+
+# Display the top features for each n_bootstraps
+head(final_results_sorted)
+```
+
+```{r}
+# Assuming coefficients of elastic_net_model are stored in elastic_net_coefficients
+elastic_net_coefficients <- as.data.frame(as.matrix(average_coefficients))
+names(elastic_net_coefficients) <- "Weight"
+# elastic_net_coefficients$Feature <- rownames(elastic_net_coefficients)
+elastic_net_coefficients$Feature <- colnames(train_data[, -ncol(train_data)])
+elastic_net_coefficients <- elastic_net_coefficients[elastic_net_coefficients$Feature != "(Intercept)", ]
+
+# Sort by absolute weight and select the top 10 features
+top_10_features <- elastic_net_coefficients[order(abs(elastic_net_coefficients$Weight), decreasing = TRUE), ][1:10, ]
+
+# Plot top 10 feature weights
+ggplot(top_10_features, aes(x = reorder(Feature, Weight), y = Weight, fill = Weight > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Feature Weights in Elastic Net Model", x = "Feature", y = "Coefficient Weight") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Optional: color for negative and positive weights
+```
+
+```{r}
+feature_plot <- function(coefficients, train_data){
+# Assuming coefficients of elastic_net_model are stored in elastic_net_coefficients
+elastic_net_coefficients <- as.data.frame(as.matrix(coefficients))
+names(elastic_net_coefficients) <- "Weight"
+elastic_net_coefficients$Feature <- colnames(train_data[, -ncol(train_data)])
+elastic_net_coefficients <- elastic_net_coefficients[elastic_net_coefficients$Feature != "(Intercept)", ]
+
+# Sort by absolute weight and select the top 10 features
+top_10_features <- elastic_net_coefficients[order(abs(elastic_net_coefficients$Weight), decreasing = TRUE), ][1:10, ]
+
+# Plot top 10 feature weights
+ggplot(top_10_features, aes(x = reorder(Feature, Weight), y = Weight, fill = Weight > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Feature Weights in Elastic Net Model", x = "Feature", y = "Coefficient Weight") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Optional: color for negative and positive weights
+}
+```
+
+```{r}
+# Create class weights (higher weight for minority class)
+class_weights <- ifelse(y == 1, weight, 1)  # Inverse class frequency as weights
+#371/34
+# Fit Elastic Net with weights
+cv_fit_weighted <- cv.glmnet(X, y, family = "binomial", alpha = 0.7, weights = class_weights)
+
+# Best lambda from cross-validation
+best_lambda_weighted <- cv_fit_weighted$lambda.min
+
+# Final model with best lambda
+elastic_net_weighted <- glmnet(X, y, family = "binomial", alpha = 0.7, lambda = best_lambda_weighted, weights = class_weights)
+
+# Get the coefficients for the best lambda
+coef_fit <- as.matrix(coef(cv_fit_weighted, s = best_lambda_weighted))
+```
+
+```{r}
+feature_plot(coef_fit[-1], train_data)
+```
+
+```{r}
+# Assuming the Elastic Net model has been fitted and we have predictions
+# Predict probabilities on the test data (or same data if no test set)
+predictions_prob <- predict(elastic_net_weighted, newx = X_test, type = "response")
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Convert the actual labels (y) to factor for comparison
+actual_labels <- as.factor(y_test)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(as.factor(predictions), actual_labels)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+cat("Elastic Net Model Evaluation Metrics:\n")
+cat("Accuracy:", accuracy, "\n")
+cat("Sensitivity:", sensitivity, "\n")
+cat("Specificity:", specificity, "\n")
+cat("Precision:", precision, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("AUC:", auc, "\n")
+```
+
+```{r}
+weights_to_test <- seq(1, 20, by = 1) 
+alphas_to_test <- seq(0, 1, by = 0.1) 
+
+results_df <- data.frame(
+  weight = numeric(),
+  accuracy = numeric(),
+  sensitivity = numeric(),
+  specificity = numeric(),
+  precision = numeric(),
+  f1_score = numeric(),
+  auc = numeric(),
+  stringsAsFactors = FALSE
+)
+
+#for (weight in weights_to_test){
+
+for (alpha in alphas_to_test){
+
+weight <- 15 
+
+# Create class weights (higher weight for minority class)
+class_weights <- ifelse(y == 1, weight, 1)  # Inverse class frequency as weights
+
+# Fit Elastic Net with weights
+cv_fit_weighted <- cv.glmnet(X, y, family = "binomial", alpha = alpha, weights = class_weights)
+
+# Best lambda from cross-validation
+best_lambda_weighted <- cv_fit_weighted$lambda.min
+
+# Final model with best lambda
+elastic_net_weighted <- glmnet(X, y, family = "binomial", alpha = alpha, lambda = best_lambda_weighted, weights = class_weights)
+
+# Predict probabilities on the test data (or same data if no test set)
+predictions_prob <- predict(elastic_net_weighted, newx = X_test, type = "response")
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Convert the actual labels (y) to factor for comparison
+actual_labels <- as.factor(y_test)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(as.factor(predictions), actual_labels)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+# cat("Elastic Net Model Evaluation Metrics:\n")
+# cat("Accuracy:", accuracy, "\n")
+# cat("Sensitivity:", sensitivity, "\n")
+# cat("Specificity:", specificity, "\n")
+# cat("Precision:", precision, "\n")
+# cat("F1 Score:", f1_score, "\n")
+# cat("AUC:", auc, "\n")
+
+# Append metrics to dataframe
+results_df <- results_df %>%
+  add_row(
+    weight = weight,
+    accuracy = as.numeric(accuracy),
+    sensitivity = as.numeric(sensitivity),
+    specificity = as.numeric(specificity),
+    precision = as.numeric(precision),
+    f1_score = as.numeric(f1_score),
+    auc = as.numeric(auc)
+  )
+
+}
+```
+
+```{r}
+weights_to_test <- seq(1, 20, by = 1) 
+
+results_df <- data.frame(
+  weight = numeric(),
+  accuracy = numeric(),
+  sensitivity = numeric(),
+  specificity = numeric(),
+  precision = numeric(),
+  f1_score = numeric(),
+  auc = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# # Check class distribution of y_test
+# cat("Class distribution in y_test:\n")
+# print(table(y_test))
+
+for (weight in weights_to_test){
+
+# Create class weights (higher weight for minority class)
+class_weights <- c("0" = 1, "1" = weight)  # Inverse class frequency as weights
+
+rf_model <- randomForest(x = X, y = as.factor(y), ntree = 10, classwt = class_weights, do.trace = TRUE)
+
+# Predict probabilities on the test data (or same data if no test set)
+predictions_prob <- predict(rf_model, newdata = X_test, type = "prob")[, 2]
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Ensure predictions and actual labels have the same factor levels
+predictions <- factor(predictions, levels = c(0, 1))  # Set levels for predictions
+actual_labels <- factor(y_test, levels = c(0, 1))     # Set levels for actual labels
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions, actual_labels)
+
+# # Print confusion matrix for the current weight
+# cat("Confusion Matrix for weight =", weight, ":\n")
+# print(conf_matrix$table)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+# cat("Elastic Net Model Evaluation Metrics:\n")
+# cat("Accuracy:", accuracy, "\n")
+# cat("Sensitivity:", sensitivity, "\n")
+# cat("Specificity:", specificity, "\n")
+# cat("Precision:", precision, "\n")
+# cat("F1 Score:", f1_score, "\n")
+# cat("AUC:", auc, "\n")
+
+# Append metrics to dataframe
+results_df <- results_df %>%
+  add_row(
+    weight = weight,
+    accuracy = as.numeric(accuracy),
+    sensitivity = as.numeric(sensitivity),
+    specificity = as.numeric(specificity),
+    precision = as.numeric(precision),
+    f1_score = as.numeric(f1_score),
+    auc = as.numeric(auc)
+  )
+
+}
+```
+
+```{r}
+weights_to_test <- seq(1, 20, by = 1) 
+
+# Hyperparameter grids to search over
+minsplit_values <- c(5, 10, 20)
+minbucket_values <- c(3, 5, 7)
+maxdepth_values <- c(3, 5, 7)
+cp_values <- c(0.01, 0.05, 0.1)
+
+results_df <- data.frame(
+  weight = numeric(),
+  minsplit = numeric(),
+  minbucket = numeric(),
+  maxdepth = numeric(),
+  cp = numeric(),
+  accuracy = numeric(),
+  sensitivity = numeric(),
+  specificity = numeric(),
+  precision = numeric(),
+  f1_score = numeric(),
+  auc = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Ensure y is a factor (important for classification)
+y <- factor(y, levels = c(0, 1))
+y_test <- factor(y_test, levels = c(0, 1))
+
+# Hyperparameters to tune
+control <- rpart.control(
+  minsplit = 10,    # Minimum observations required to attempt a split
+  minbucket = 5,    # Minimum observations in a terminal node
+  maxdepth = 5,     # Limit the depth of the tree
+  cp = 0.01         # Complexity parameter to control pruning
+)
+
+
+# # Check class distribution of y_test
+# cat("Class distribution in y_test:\n")
+# print(table(y_test))
+
+for (weight in weights_to_test) {
+
+# Create class weights (higher weight for minority class)
+class_weights <- c("0" = 1, "1" = weight)  # Inverse class frequency as weights
+class_weights <- class_weights / sum(class_weights)  # Normalize to sum to 
+
+  # Fit Decision Tree model with class weights
+  dt_model <- rpart(
+    y ~ ., 
+    data = data.frame(X, y), 
+    method = "class", 
+    parms = list(prior = class_weights),
+    control = control
+  )
+
+# Predict probabilities on the test data (or same data if no test set)
+predictions_prob <- predict(dt_model, newdata = as.data.frame(X_test), type = "prob")[, 2]
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Ensure predictions and actual labels have the same factor levels
+predictions <- factor(predictions, levels = c(0, 1))  # Set levels for predictions
+actual_labels <- factor(y_test, levels = c(0, 1))     # Set levels for actual labels
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions, actual_labels)
+
+# # Print confusion matrix for the current weight
+# cat("Confusion Matrix for weight =", weight, ":\n")
+# print(conf_matrix$table)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+# cat("Elastic Net Model Evaluation Metrics:\n")
+# cat("Accuracy:", accuracy, "\n")
+# cat("Sensitivity:", sensitivity, "\n")
+# cat("Specificity:", specificity, "\n")
+# cat("Precision:", precision, "\n")
+# cat("F1 Score:", f1_score, "\n")
+# cat("AUC:", auc, "\n")
+
+# Append metrics to dataframe
+results_df <- results_df %>%
+  add_row(
+    weight = weight,
+    minsplit = minsplit,
+    minbucket = minbucket,
+    maxdepth = maxdepth,
+    cp = cp,
+    accuracy = as.numeric(accuracy),
+    sensitivity = as.numeric(sensitivity),
+    specificity = as.numeric(specificity),
+    precision = as.numeric(precision),
+    f1_score = as.numeric(f1_score),
+    auc = as.numeric(auc)
+  )
+
+}
+```
+
+```{r}
+weights_to_test <- seq(1, 20, by = 1) 
+
+results_df <- data.frame(
+  weight = numeric(),
+  accuracy = numeric(),
+  sensitivity = numeric(),
+  specificity = numeric(),
+  precision = numeric(),
+  f1_score = numeric(),
+  auc = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Ensure y is a factor (important for classification)
+y <- factor(y, levels = c(0, 1))
+y_test <- factor(y_test, levels = c(0, 1))
+
+# Standardize the features (X and X_test)
+X_scaled <- scale(X)
+X_test_scaled <- scale(X_test)
+
+# # Check class distribution of y_test
+# cat("Class distribution in y_test:\n")
+# print(table(y_test))
+
+for (weight in weights_to_test){
+
+# Create class weights (higher weight for minority class)
+class_weights <- ifelse(y == 1, weight, 1)  # Inverse class frequency as weights
+
+log_reg_model <- glm(
+  y ~ ., 
+  data = data.frame(X_scaled, y), 
+  family = binomial(link = "logit"), 
+  weights = class_weights, # Add weights here
+  control = list(maxit = 100)
+)
+
+# Predict probabilities on the test data (or same data if no test set)
+predictions_prob <- predict(log_reg_model, newdata = data.frame(X_test_scaled), type = "response")
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Ensure predictions and actual labels have the same factor levels
+predictions <- factor(predictions, levels = c(0, 1))  # Set levels for predictions
+actual_labels <- factor(y_test, levels = c(0, 1))     # Set levels for actual labels
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions, actual_labels)
+
+# # Print confusion matrix for the current weight
+cat("Confusion Matrix for weight =", weight, ":\n")
+print(conf_matrix$table)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+# cat("Elastic Net Model Evaluation Metrics:\n")
+# cat("Accuracy:", accuracy, "\n")
+# cat("Sensitivity:", sensitivity, "\n")
+# cat("Specificity:", specificity, "\n")
+# cat("Precision:", precision, "\n")
+# cat("F1 Score:", f1_score, "\n")
+# cat("AUC:", auc, "\n")
+
+# Append metrics to dataframe
+results_df <- results_df %>%
+  add_row(
+    weight = weight,
+    accuracy = as.numeric(accuracy),
+    sensitivity = as.numeric(sensitivity),
+    specificity = as.numeric(specificity),
+    precision = as.numeric(precision),
+    f1_score = as.numeric(f1_score),
+    auc = as.numeric(auc)
+  )
+
+}
+```
+
+```{r}
+class_weights <- ifelse(y == 1, 15, 1)
+pca_result <- prcomp(X_scaled, center = TRUE, scale. = TRUE)
+X_pca <- pca_result$x
+train_control <- trainControl(method = "cv", number = 5)
+data <- data.frame(X_pca[, 1:10], y = as.factor(y))
+smote_data <- SMOTE(data.frame(X[, predRFE]), y, K = 5)
+smote_balanced_data <- smote_data$data
+# Separate predictors and target variable from the balanced data
+X_balanced <- smote_balanced_data[, -ncol(smote_balanced_data)]  # Predictor variables
+y_balanced <- smote_balanced_data[, ncol(smote_balanced_data)]   # Target variable
+
+
+log_reg_pca <- train(y_balanced ~ ., data=data.frame(X_balanced, y_balanced), method="glm", family = binomial)
+summary(log_reg_pca)
+```

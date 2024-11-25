@@ -1,0 +1,400 @@
+---
+title: "Variable Importance"
+output: html_notebook
+---
+
+```{r, echo=FALSE}
+library(DALEX)
+library(TH.data)
+library(caret)
+library(tictoc)
+```
+
+```{r, echo=False}
+trainData <- read.csv("../../stats/dataClean2.csv")
+trainData <- na.omit(trainData)
+# trainData$fallsBin <- as.factor(trainData$fallsBin)
+head(trainData)
+levels(trainData$fallsBin)
+```
+
+## Boruta
+
+```{r, echo=False}
+library(Boruta)
+```
+
+```{r}
+boruta_output <- Boruta(fallsBin ~ ., data=trainData, maxRuns=1000, doTrace=0)  
+```
+
+```{r}
+names(boruta_output)
+```
+
+```{r}
+boruta_signif <- getSelectedAttributes(boruta_output, withTentative = TRUE)
+print(boruta_signif)  
+```
+
+```{r}
+roughFixMod <- TentativeRoughFix(boruta_output)
+boruta_signif <- getSelectedAttributes(roughFixMod)
+print(boruta_signif)
+```
+
+```{r}
+imps <- attStats(roughFixMod)
+imps2 = imps[imps$decision != 'Rejected', c('meanImp', 'decision')]
+head(imps2[order(-imps2$meanImp), ])  # descending sort
+```
+
+```{r}
+plot(boruta_output, cex.axis=.7, las=2, xlab="", main="Variable Importance")
+```
+
+```{r}
+# set.seed(100)
+# control <- trainControl(method = "cv", number = 10, verboseIter = TRUE)
+# rrfMod <- train(fallsBin ~ ., data = trainData, method = "RRF", trControl = control)
+```
+
+## Lasso/Ridge/Elastic Net
+
+```{r}
+library(glmnet)
+
+x <- as.matrix(trainData[,-ncol(trainData)]) # all X vars
+y <- as.double(as.matrix(trainData[,ncol(trainData)])) # Only Class
+
+# Fit the LASSO model (Lasso: Alpha = 1)
+set.seed(100)
+cv.lasso <- cv.glmnet(x, y, family='binomial', alpha=0.5, parallel=TRUE, standardize=TRUE, type.measure='auc')
+#> Warning: executing %dopar% sequentially: no parallel backend registered
+
+# Results
+plot(cv.lasso)
+```
+
+```{r}
+cat('Min Lambda: ', cv.lasso$lambda.min, '\n 1Sd Lambda: ', cv.lasso$lambda.1se)
+df_coef <- round(as.matrix(coef(cv.lasso, s=cv.lasso$lambda.min)), 2)
+df_coef[df_coef[, 1] != 0, ]
+```
+
+## Genetic Algorithm
+
+```{r}
+tic()
+ga_ctrl <- gafsControl(functions = rfGA,  # another option is `caretGA`.
+                        method = "cv",
+                        repeats = 10)
+ga_obj <- gafs(x=trainData, 
+               y=trainData[, 595], 
+               iters = 100,   # normally much higher (100+)
+               gafsControl = ga_ctrl)
+toc()
+```
+
+```{r}
+ga_obj
+```
+
+```{r}
+library(randomForest)
+library(DALEX)
+rf_mod <- randomForest(factor(fallsBin) ~ ., data = trainData, ntree=100)
+```
+
+```{r}
+trainData_without_response <- trainData[, -which(names(trainData) == "fallsBin")]
+explained_rf <- explain(rf_mod, data=trainData_without_response, y=trainData$fallsBin)
+```
+
+varimps = variable_importance(explained_rf, type='raw')
+
+print(varimps)
+
+```{r}
+# importance_values <- importance(rf_mod)
+# sorted_importance_gini <- importance_values[order(-importance_values[, "MeanDecreaseGini"]), ]
+# print(sorted_importance_gini)
+
+```
+
+```{r}
+plot(sorted_importance_gini)
+```
+
+```{r}
+library(dplyr)
+library(effsize)
+
+numeric_features <- sapply(trainData, is.numeric)
+numeric_features <- names(numeric_features[numeric_features])
+
+# Initialize a vector to store the effect sizes
+effect_sizes <- setNames(numeric(length(numeric_features)), numeric_features)
+
+
+for (feature in names(effect_sizes)) {
+  effect_sizes[feature] <- cohen.d(trainData[[feature]], trainData$fallsBin)$estimate
+}
+
+effect_sizes_df <- data.frame(Feature = names(effect_sizes), Effect_Size = effect_sizes)
+
+effect_sizes_df <- effect_sizes_df %>% arrange(desc(abs(Effect_Size)))
+
+print(effect_sizes_df)
+```
+
+```{r}
+
+# Load the libraries
+library(Boruta)
+library(randomForest)
+library(rpart)
+
+
+
+
+# Apply Boruta for feature selection
+set.seed(123)
+boruta_result <- Boruta(fallsBin ~ ., data = trainData, doTrace = 2)
+
+# Print Boruta result
+print(boruta_result)
+
+# Get the selected attributes
+selected_features <- getSelectedAttributes(boruta_result, withTentative = TRUE)
+print(selected_features)
+
+# Create a new dataset with only the selected features
+medical_data_selected <- trainData[, c(selected_features, "fallsBin")]
+
+# Train a Random Forest model using the selected features
+set.seed(123)
+rf_model <- randomForest(fallsBin ~ ., data = medical_data_selected, importance = TRUE)
+
+
+# Print the model summary
+print(rf_model)
+
+# Show feature importance
+importance(rf_model)
+
+# Train a Decision Tree using the selected features
+dt_model <- rpart(disease ~ ., data = medical_data_selected, method = "class")
+
+# Plot the Decision Tree
+plot(dt_model)
+text(dt_model, pretty = 1)
+
+# Print the Decision Tree rules
+print(dt_model)
+
+```
+
+```{r}
+library(randomForestSRC)
+library(dplyr)
+
+medical_data <- trainData %>% mutate_if(is.character, as.factor)
+
+brf_model <- rfsrc(fallsBin ~ ., data = medical_data, ntree = 100, 
+                   samptype = "swr",   # Sampling with replacement
+                   sampsize = c(20, 20), # Balance the classes (equal number of samples from each class)
+                   importance = TRUE)
+
+# Print the model summary
+print(brf_model)
+
+# Show variable importance
+imp = brf_model$importance
+
+# Predict on the training data (or a test set)
+predictions <- predict(brf_model, newdata = medical_data)
+
+# Confusion Matrix
+confusion_matrix <- table(predictions$class, medical_data$fallsBin)
+print(confusion_matrix)
+```
+
+```{r}
+
+medical_data_numeric <- model.matrix(~ . - 1, data = trainData)
+medical_data_numeric <- as.data.frame(medical_data_numeric)
+
+predictor_columns <- names(medical_data_numeric)[!names(medical_data_numeric) %in% "fallsBin"]
+cor_matrix <- cor(medical_data_numeric[, predictor_columns])
+
+```
+
+```{r}
+# write.csv(cor_matrix, "correlation_matrix_.csv", row.names = TRUE)
+```
+
+```{r}
+# Load necessary libraries
+library(glmnet)
+library(boot)
+
+data = trainData
+
+# Load your data
+# Assuming your data is stored in a data frame `data` with response `fallsBin`
+# Replace 'data' with the name of your dataset
+
+# Separate predictors and response
+y <- data$fallsBin
+X <- as.matrix(data[, colnames(data) != "fallsBin"])
+
+# Set Elastic Net alpha value (0 = Ridge, 1 = Lasso, 0.5 = Elastic Net)
+alpha <- 0.5
+
+# Number of bootstrap samples
+n_bootstraps <- 100
+
+# Store the coefficients
+coefficients_matrix <- matrix(0, nrow = n_bootstraps, ncol = ncol(X))
+
+# Store the selection frequency
+selection_frequency <- numeric(ncol(X))
+
+# Bootstrap Elastic Net model fitting
+for (i in 1:n_bootstraps) {
+  # Bootstrap sampling
+  set.seed(i)
+  boot_sample <- sample(1:nrow(X), replace = TRUE)
+  X_boot <- X[boot_sample, ]
+  y_boot <- y[boot_sample]
+  
+  # Fit Elastic Net model with cross-validation
+  cv_fit <- cv.glmnet(X_boot, y_boot, family = "binomial", alpha = alpha)
+  
+  # Get the coefficients for the best lambda
+  best_lambda <- cv_fit$lambda.min
+  coef_fit <- as.matrix(coef(cv_fit, s = best_lambda))
+  
+  # Store coefficients (excluding the intercept)
+  coefficients_matrix[i, ] <- coef_fit[-1]
+  
+  # Track if the feature was selected (non-zero coefficient)
+  selection_frequency <- selection_frequency + (coef_fit[-1] != 0)
+}
+
+# Calculate average coefficient for each predictor
+average_coefficients <- apply(coefficients_matrix, 2, mean)
+
+# Calculate selection frequency (proportion of times a feature was selected)
+selection_frequency <- selection_frequency / n_bootstraps
+
+# Combine selection frequency and average coefficients
+results <- data.frame(
+  Predictor = colnames(X),
+  Selection_Frequency = selection_frequency,
+  Average_Coefficient = average_coefficients
+)
+
+# Print the result
+print(results)
+
+# Sort by selection frequency
+results_sorted <- results[order(-results$Selection_Frequency), ]
+
+# Display the top features
+head(results_sorted)
+```
+
+```{r}
+# Assuming coefficients of elastic_net_model are stored in elastic_net_coefficients
+elastic_net_coefficients <- as.data.frame(as.matrix(average_coefficients))
+names(elastic_net_coefficients) <- "Weight"
+elastic_net_coefficients$Feature <- rownames(elastic_net_coefficients)
+elastic_net_coefficients <- elastic_net_coefficients[elastic_net_coefficients$Feature != "(Intercept)", ]
+
+# Sort by absolute weight and select the top 10 features
+top_10_features <- elastic_net_coefficients[order(abs(elastic_net_coefficients$Weight), decreasing = TRUE), ][1:10, ]
+
+# Plot top 10 feature weights
+ggplot(top_10_features, aes(x = reorder(Feature, Weight), y = Weight, fill = Weight > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Feature Weights in Elastic Net Model", x = "Feature", y = "Coefficient Weight") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"))  # Optional: color for negative and positive weights
+
+```
+
+```{r}
+# Create class weights (higher weight for minority class)
+class_weights <- ifelse(y == 1, 371/34, 1)  # Inverse class frequency as weights
+
+# Fit Elastic Net with weights
+cv_fit_weighted <- cv.glmnet(X, y, family = "binomial", alpha = 0.5, weights = class_weights)
+
+# Best lambda from cross-validation
+best_lambda_weighted <- cv_fit_weighted$lambda.min
+
+# Final model with best lambda
+elastic_net_weighted <- glmnet(X, y, family = "binomial", alpha = 0.5, lambda = best_lambda_weighted, weights = class_weights)
+```
+
+```{r}
+# Load necessary libraries
+library(pROC)  # For AUC
+library(caret) # For confusion matrix and other metrics
+
+# Assuming the Elastic Net model has been fitted and we have predictions
+# Predict probabilities on the test data (or same data if no test set)
+predictions_prob <- predict(elastic_net_weighted, newx = X, type = "response")
+
+# Convert probabilities to binary class labels (assuming 0.5 threshold)
+predictions <- ifelse(predictions_prob > 0.5, 1, 0)
+
+# Convert the actual labels (y) to factor for comparison
+actual_labels <- as.factor(y)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(as.factor(predictions), actual_labels)
+
+# Extract Evaluation Metrics
+accuracy <- conf_matrix$overall['Accuracy']
+sensitivity <- conf_matrix$byClass['Sensitivity']
+specificity <- conf_matrix$byClass['Specificity']
+precision <- conf_matrix$byClass['Pos Pred Value']  # Positive Predictive Value
+f1_score <- 2 * ((precision * sensitivity) / (precision + sensitivity))
+
+# AUC (Area Under the Curve)
+roc_curve <- roc(actual_labels, predictions_prob)
+auc <- auc(roc_curve)
+
+# Print the results
+cat("Elastic Net Model Evaluation Metrics:\n")
+cat("Accuracy:", accuracy, "\n")
+cat("Sensitivity:", sensitivity, "\n")
+cat("Specificity:", specificity, "\n")
+cat("Precision:", precision, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("AUC:", auc, "\n")
+
+```
+
+```{r}
+library(glmnet)
+library(e1071)
+# LASSO (alpha = 1)
+lasso_cv <- cv.glmnet(X, y, family = "binomial", alpha = 1)
+lasso_model <- glmnet(X, y, family = "binomial", alpha = 1, lambda = lasso_cv$lambda.min)
+
+# Stepwise Logistic Regression
+#stepwise_model <- step(glm(y ~ ., data = data, family = binomial), direction = "both", trace = FALSE)
+
+# Support Vector Machine (SVM) with Radial Basis Function Kernel
+dat = data.frame(X, y = as.factor(y))
+svm_model <- svm(X, y, kernel = "linear", probability = TRUE)
+
+# Model evaluation (Confusion Matrix, AUC, etc.)
+predict_svm <- predict(svm_model, X, probability = TRUE)
+confusionMatrix(as.factor(predict_svm), y)
+```

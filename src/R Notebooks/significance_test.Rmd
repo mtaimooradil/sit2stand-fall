@@ -1,0 +1,134 @@
+---
+title: "Significance Test"
+output: html_notebook
+---
+
+```{r}
+data <- read.csv("../../stats/dataClean2.csv")
+#data <- data[,c(1:10, ncol(data))]
+group_fall_0 <- data[data$fallsBin == 0,]
+group_fall_1 <- data[data$fallsBin == 1,]
+num_features <- sapply(data, is.numeric)
+```
+
+```{r}
+results_df <- data.frame(
+  feature = character(),
+  test = character(),
+  statistic = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+for (feature in names(data)[num_features]) {
+  # Normality Test
+  shapiro_test_0 <- shapiro.test(group_fall_0[[feature]])
+  shapiro_test_1 <- shapiro.test(group_fall_1[[feature]])
+  
+  if (shapiro_test_0$p.value > 0.05 & shapiro_test_1$p.value > 0.05) {
+    # Use t-test
+    t_test <- t.test(group_fall_0[[feature]], group_fall_1[[feature]])
+    
+    # Append to the dataframe
+    results_df <- rbind(results_df, data.frame(
+      feature = feature,
+      test = "t-test",
+      statistic = t_test$statistic,
+      p_value = t_test$p.value
+    ))
+  } else {
+    # Use Mann-Whitney U test (Wilcoxon Rank Sum)
+    wilcox_test <- wilcox.test(group_fall_0[[feature]], group_fall_1[[feature]])
+    
+    # Append to the dataframe
+    results_df <- rbind(results_df, data.frame(
+      feature = feature,
+      test = "Mann-Whitney U",
+      statistic = wilcox_test$statistic,
+      p_value = wilcox_test$p.value
+    ))
+  }
+}
+
+# Apply Benjamini-Hochberg FDR correction
+results_df$p_value_adjusted <- p.adjust(results_df$p_value, method = "BH")
+
+significant_results <- results_df[results_df$p_value < 0.05, ]
+```
+
+```{r}
+significant_results <- results_df[results_df$p_value < 0.05, ]
+```
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Function to remove multicollinearity
+remove_multicollinearity <- function(data, threshold = 0.7) {
+  # Select only numeric columns from the data
+  data <- data %>% select(where(is.numeric))
+  
+  # Calculate the correlation matrix
+  corr_matrix <- abs(cor(data, use = "pairwise.complete.obs"))
+  
+  # Set the diagonal (self-correlations) to NA
+  diag(corr_matrix) <- NA
+  
+  # Create an upper triangle matrix to avoid redundant correlations
+  upper_tri <- corr_matrix
+  upper_tri[lower.tri(upper_tri)] <- NA
+  
+  # Find pairs of features with correlation greater than the threshold
+  high_corr_pairs <- which(upper_tri > threshold, arr.ind = TRUE)
+  
+   # Create a data frame of the pairs with their correlation values
+  result <- data.frame(
+    Feature1 = rownames(upper_tri)[high_corr_pairs[, 1]],
+    Feature2 = colnames(upper_tri)[high_corr_pairs[, 2]],
+    Correlation = corr_matrix[high_corr_pairs]
+  )
+  
+ # Initialize a vector to hold columns to drop
+  to_drop <- c()
+
+  # Iterate through columns, dropping one variable from each highly correlated pair
+  for (i in 1:ncol(upper_tri)) {
+    high_corr_cols <- which(upper_tri[, i] < threshold, arr.ind = TRUE)
+
+
+    if (length(high_corr_cols) > 0) {
+      col_to_drop <- colnames(upper_tri)[i]
+      if (!(col_to_drop %in% to_drop)) {
+        to_drop <- c(to_drop, col_to_drop)
+      }
+    }
+  }
+
+  # Drop the columns with high correlation from the numeric dataset
+  reduced_data <- data %>% select(-all_of(to_drop))
+
+  # Return the reduced dataset and dropped columns
+  list(reduced_data = reduced_data, dropped_columns = to_drop)
+
+  # return(upper_tri)
+}
+
+# Usage
+# Assuming your data is in a data frame called df
+df <- data[,-ncol(data)]
+result <- remove_multicollinearity(df, threshold = 0.7)
+
+# Access the reduced dataset and dropped columns
+reduced_df <- result$reduced_data
+dropped_columns <- result$dropped_columns
+
+# Save the reduced dataset if needed
+# write.csv(result, "multicollinearity.csv", row.names = FALSE)
+
+print("Dropped columns due to multicollinearity:")
+print(dropped_columns)
+
+```

@@ -1,0 +1,8 @@
+"","numMedCond","pelvic_avg_speed","right_hip_min_ang_acc","right_hip_max_mean_stand2sit","left_hip_min_ang_vel_sit2stand","right_ankle_max_sd_stand2sit"
+"numMedCond","","","","","",""
+"pelvic_avg_speed","-0.08    ","","","","",""
+"right_hip_min_ang_acc"," 0.00    ","-0.58****","","","",""
+"right_hip_max_mean_stand2sit","-0.19*** ","-0.15**  "," 0.04    ","","",""
+"left_hip_min_ang_vel_sit2stand"," 0.09    ","-0.15**  "," 0.24****","-0.02    ","",""
+"right_ankle_max_sd_stand2sit"," 0.06    ","-0.05    "," 0.04    "," 0.00    "," 0.03    ",""
+"left_knee_max_mean_stand2sit","-0.11*   ","-0.17*** "," 0.04    "," 0.35****"," 0.04    "," 0.10*   "
